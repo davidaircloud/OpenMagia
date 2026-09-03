@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="style.css">
+<style>
+  body{margin:0;background:#09090b;display:flex;gap:24px;padding:20px;font-family:-apple-system,'Segoe UI',sans-serif}
+  .bin{width:250px;height:560px;border-right:1px solid var(--line);background:#0d0d0f;padding:14px 12px;box-sizing:border-box}
+  .lbl{color:#71717a;font-size:11px;margin:0 0 6px}
+</style></head>
+<body>
+  <div class="bin">
+    <p class="lbl">Root (before)</p>
+    <div class="head"><h3>Media</h3></div>
+    <div id="mediaGridRoot" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:14px 2px 8px;align-content:start">
+      <div class="ftile"><span class="fthumb">&#128193;</span><div class="fmeta"><span class="fname">B-roll</span><span class="fcount">4</span></div></div>
+      <div class="ftile"><span class="fthumb">&#128193;</span><div class="fmeta"><span class="fname">Voiceovers</span><span class="fcount">2</span></div></div>
+    </div>
+  </div>
+  <div class="bin">
+    <p class="lbl">Inside folder (new compact buttons)</p>
+    <div class="head"><h3>Media</h3></div>
+    <div id="mediaGrid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:14px 2px 8px;align-content:start">
+      <div class="ftile action"><span class="fthumb">&#8617;&#65039;</span><div class="fmeta"><span class="fname">Go back</span></div></div>
+      <div class="ftile action"><span class="fthumb">&#10133;</span><div class="fmeta"><span class="fname">Add media</span></div></div>
+      <div class="ftile"><span class="fthumb">&#128193;</span><div class="fmeta"><span class="fname">Sub-folder</span><span class="fcount">1</span></div></div>
+      <div class="mtile"><div class="thumb"></div><div class="meta"><div class="n">clip_01.mp4</div><div class="d">0:12</div></div></div>
+    </div>
+  </div>
+</body></html>
