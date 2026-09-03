@@ -615,6 +615,10 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertEqual(params["frames"], 5)
         self.assertEqual(server.next_image_name({"scenes": [{"name": "Image 1"}, {"name": "Scene 1"}]}), "Image 2")
 
+    def test_generation_clamps_to_h3_minimum_denoising_steps(self):
+        params = server.clamp_generation_params({"steps": 1})
+        self.assertEqual(params["steps"], 2)
+
     def test_long_native_video_honors_requested_high_schedule(self):
         params = server.clamp_generation_params({"width": 1344, "height": 768, "frames": 360,
                                                   "steps": 30, "layers": 50, "reuse": 1,

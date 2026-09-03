@@ -1577,7 +1577,9 @@ def clamp_generation_params(params, generation_type="video"):
     """Normalize user parameters at the trust boundary."""
     out = dict(params)
     out["frames"] = 5 if generation_type == "image" else max(8, min(MAX_FRAMES, int(out.get("frames", 56))))
-    out["steps"] = max(1, min(60, int(out.get("steps", 20))))
+    # h3.c rejects fewer than two denoising steps, so clamp at the API
+    # boundary instead of letting a queued job fail after process startup.
+    out["steps"] = max(2, min(60, int(out.get("steps", 20))))
     allowed_sizes = {(512, 512), (512, 896), (896, 512),
                      (768, 768), (768, 1344), (1344, 768),
                      (1024, 768), (768, 1024)}
