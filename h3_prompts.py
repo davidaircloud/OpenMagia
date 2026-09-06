@@ -253,13 +253,13 @@ SHEET_RECIPES = [
     {"id": "turn-4", "name": "Quick turn · 4 views",
      "tagline": "Back, side, front, and a face shot (~3 s)",
      "frames": 72,
-     "script": ("[0.00-2.00 seconds] Tight full shot of the subject. The camera makes one smooth fixed-speed orbit around "
+     "script": ("[0.00-1.70 seconds] Tight full shot of the subject. The camera makes one smooth fixed-speed orbit around "
                 "it, sweeping 180 degrees: starting square on the back, passing the left side a third of the way through "
-                "this move, and ending square on the front at 2 seconds. The subject does not move at all. Ends on the "
-                "front view at 2 seconds. "
-                "[2.00-3.00 seconds] The camera snaps into a fast push-in on the character's face. Locked-off "
+                "this move, and ending square on the front at 1.70 seconds. The subject does not move at all. "
+                "[1.70-2.10 seconds] Hold the complete square front view perfectly still; do not push in or transition. "
+                "[2.10-3.00 seconds] Hard cut directly to a locked-off "
                 "head-and-shoulders close-up, face square to camera, eyes into the lens. Ends on a sharp front-on face."),
-     "extract": [(0.05, "back"), (0.67, "left side"), (2.00, "front"), (2.90, "front face")]},
+     "extract": [(0.05, "back"), (0.67, "left side"), (1.90, "front"), (2.90, "front face")]},
 ]
 
 SHEET_STYLES = [

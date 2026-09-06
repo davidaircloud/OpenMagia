@@ -1255,6 +1255,11 @@ async function deleteMedia(m) {
 function renderInspector({preserveScroll=false}={}) {
   const scroller=$('#rightCol'),previousScroll=preserveScroll&&scroller?scroller.scrollTop:0;
   const body = $('#inspBody'); const hint = $('#inspHint');
+  // Background job polling calls renderAll repeatedly. Replacing an actively
+  // playing preview destroys its media element and makes playback stop at the
+  // next poll, so leave that inspector intact until the user pauses or it ends.
+  const playingPreview=$('.inspectorMediaPreview video',body);
+  if(preserveScroll&&playingPreview&&!playingPreview.paused&&!playingPreview.ended)return;
   const priorPrompt=$('.sceneSourcePrompt',body),promptState=priorPrompt?{scrollTop:priorPrompt.scrollTop,start:priorPrompt.selectionStart,end:priorPrompt.selectionEnd}:null;
   const openProvenance=new Set($$('.promptProvenance[open]',body).map(node=>node.dataset.provenance));
   const restoreScroll=()=>{if(preserveScroll&&scroller)scroller.scrollTop=previousScroll;const prompt=$('.sceneSourcePrompt',body);if(prompt&&promptState){prompt.scrollTop=promptState.scrollTop;if(document.activeElement===prompt)prompt.setSelectionRange(promptState.start,promptState.end);}$$('.promptProvenance',body).forEach(node=>{if(openProvenance.has(node.dataset.provenance))node.open=true;});};

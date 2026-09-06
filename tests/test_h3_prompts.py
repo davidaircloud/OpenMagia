@@ -169,6 +169,14 @@ class SheetPromptTests(unittest.TestCase):
         self.assertIn("None.", prompt)
         self.assertIn("3.00-second", prompt)
 
+    def test_quick_turn_extracts_front_from_hold_before_closeup_cut(self):
+        views = dict((label, t) for t, label in sheet_extract_times("turn-4"))
+        recipe = next(item for item in SHEET_RECIPES if item["id"] == "turn-4")
+        self.assertEqual(views["front"], 1.90)
+        self.assertIn("Hold the complete square front view", recipe["script"])
+        self.assertIn("[2.10-3.00 seconds] Hard cut", recipe["script"])
+        self.assertLess(views["front"], 2.10)
+
     def test_sheet_staging_is_species_neutral_and_temporally_stable(self):
         prompt = format_sheet_prompt(name="Kiko", identity="A golden dog.", references=["golden coat"])
         self.assertIn("A quadruped stands naturally", prompt)
