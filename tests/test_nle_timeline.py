@@ -730,6 +730,46 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertIn("This scene:", issue["detail"])
         self.assertIn("Fix:", issue["detail"])
 
+    def test_continuity_audit_blocks_refine_duration_skill_and_resource_drift(self):
+        payload = {"style_profile": {"prompt": "s" * 3000}, "scenes": [{
+            "name": "Scene 1", "prompt": "p" * 3100, "duration_seconds": 5,
+            "params": {"frames": 18}, "prompt_skill_id": None,
+            "required_prompt_skill_id": "handdrawn-live",
+            "reference_media_ids": ["a", "b", "c"],
+            "character_reference_ids": {"aiko": ["d", "e"]},
+            "continue_previous": False,
+        }]}
+        result = server.audit_storyboard_continuity(payload, {"characters": []}, False)
+        categories = {issue["category"] for issue in result["issues"]}
+        self.assertTrue({"duration", "skill", "resource"}.issubset(categories))
+
+    def test_generation_prompt_rejects_metal_attention_overload_before_h3(self):
+        with self.assertRaisesRegex(ValueError, "too dense"):
+            server.validate_generation_prompt("x" * 7001, 120, 1)
+
+    def test_reference_optimizer_atlases_environment_without_merging_cast(self):
+        cast = {"name": "Aiko", "paths": [Path("front.png"), Path("profile.png")]}
+        environment = [
+            {"name": "Balcony side", "paths": [Path("side.png")], "kind": "visual_reference"},
+            {"name": "Balcony down", "paths": [Path("down.png")], "kind": "visual_reference"},
+        ]
+        atlas = {"name": "Environment atlas", "paths": [Path("atlas.jpg")],
+                 "kind": "visual_reference", "atlas_sources": 2}
+        third = {"name": "Skyline", "paths": [Path("sky.png")], "kind": "visual_reference"}
+        with mock.patch.object(server, "build_reference_atlas", return_value=atlas):
+            optimized = server.optimize_generation_references({}, [cast, *environment, third])
+        self.assertEqual(optimized[0], cast)
+        self.assertEqual(optimized[1]["name"], "Balcony side")
+        self.assertIn("PRIMARY ENVIRONMENT", optimized[1]["description"])
+        self.assertEqual(optimized[2], atlas)
+        self.assertEqual(server.visual_reference_count(optimized), 4)
+
+    def test_continuity_audit_blocks_routes_through_balcony_architecture(self):
+        payload = {"scenes": [{"prompt": "Aiko swings around the outer end of the balcony divider.",
+                                "params": {"frames": 120}, "continue_previous": False}]}
+        result = server.audit_storyboard_continuity(payload, {"characters": []}, False)
+        self.assertIn("physical", {issue["category"] for issue in result["issues"]})
+
     def test_short_high_quality_video_keeps_full_schedule(self):
         params = server.clamp_generation_params({"width": 1344, "height": 768, "frames": 120,
                                                   "steps": 30, "layers": 50, "reuse": 1,

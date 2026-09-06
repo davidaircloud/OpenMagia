@@ -1855,7 +1855,7 @@ function revealSideSheet(root,panel){
 }
 function closeComposerPicker() {
   sideSheetOpenToken++;
-  $('#composerPicker').classList.remove('on','detail-open','template-sheet');
+  $('#composerPicker').classList.remove('on','detail-open','template-sheet','context-picker');
   $('#composerPickerDetail').classList.remove('characterEditor', 'sheetComposer', 'castReferenceEditor');
   $('.sheetHead', $('#composerPicker')).classList.remove('nosub');
   const sub = $('#composerPickerSubtitle');
@@ -1921,7 +1921,7 @@ function renderComposerPicker() {
       b.innerHTML = '<span class="pickerIcon castPickerThumb">'+thumb+'</span><span><strong>' + esc(character.name) + '</strong><small>' + count + ' identity reference' + (count === 1 ? '' : 's') + (character.description?' · identity notes':'') + '</small></span><em>' + (selChars.has(character.id) ? 'Added' : 'Cast') + '</em>';
       b.addEventListener('click', () => { selectedPickerItem = character; renderPickerDetail(); }); wrap.appendChild(b);
     }
-    if (!state.characters.length) wrap.innerHTML = '<div class="gempty"><p>No cast members yet. Create one to add ordered identity references.</p></div>';
+    if (!state.characters.length) wrap.innerHTML = '<div class="storyboardPickerEmpty"><span aria-hidden="true">◎</span><h3>No saved Cast members</h3><p>Save a character to Cast first, then return here to select its reference screenshots.</p></div>';
     return;
   }
   const styleMode = composerPickerMode === 'style';
@@ -1995,7 +1995,7 @@ function renderPickerDetail() {
   $('#composerPicker').classList.add('detail-open');
 }
 function openComposerPicker(mode) {
-  composerPickerMode = mode; selectedPickerItem = null; $('#composerPickerDetail').classList.remove('characterEditor','castReferenceEditor'); $('#composerPickerSearch').value = ''; renderComposerPicker();
+  composerPickerMode = mode; selectedPickerItem = null; $('#composerPickerDetail').classList.remove('characterEditor','castReferenceEditor'); $('#composerPickerSearch').value = ''; $('#composerPicker').classList.toggle('context-picker',['cast','references','source'].includes(mode)); renderComposerPicker();
   revealSideSheet($('#composerPicker'),$('.pickerPanel',$('#composerPicker')));
   setTimeout(() => $('#composerPickerSearch').focus(), 0);
 }
@@ -2133,7 +2133,9 @@ function renderStoryboardReferencePicker(){
     $('#storyboardPickerBudget').textContent='';
     return;
   }else if(picker.mode==='cast'){
-    for(const character of state.characters){const refs=prioritizedCharacterRefs(character).map(mediaById).filter(Boolean).filter(m=>!q||(character.name+' '+m.name).toLowerCase().includes(q));if(!refs.length)continue;const group=div('storyboardPickerGroup');group.innerHTML='<h3>'+esc(character.name)+'</h3><p>Select only the views this scene needs.</p><div class="storyboardPickerGrid">'+refs.map(m=>'<button class="storyboardPickerItem '+(picker.selected.has(m.id)?'on':'')+'" data-storyboard-pick="'+esc(m.id)+'"><img src="'+esc(mediaUrl(m))+'" alt=""><span>'+esc((m.name||character.name).replace(character.name+' · ','').replace(character.name+' - ',''))+'</span>'+(picker.selected.has(m.id)?'<b>✓</b>':'')+'</button>').join('')+'</div>';content.appendChild(group);}
+    let visibleCharacters=0;
+    for(const character of state.characters){const refs=prioritizedCharacterRefs(character).map(mediaById).filter(Boolean).filter(m=>!q||(character.name+' '+m.name).toLowerCase().includes(q));if(!refs.length)continue;visibleCharacters++;const group=div('storyboardPickerGroup');group.innerHTML='<h3>'+esc(character.name)+'</h3><p>Select only the views this scene needs.</p><div class="storyboardPickerGrid">'+refs.map(m=>'<button class="storyboardPickerItem '+(picker.selected.has(m.id)?'on':'')+'" data-storyboard-pick="'+esc(m.id)+'"><img src="'+esc(mediaUrl(m))+'" alt=""><span>'+esc((m.name||character.name).replace(character.name+' · ','').replace(character.name+' - ',''))+'</span>'+(picker.selected.has(m.id)?'<b>✓</b>':'')+'</button>').join('')+'</div>';content.appendChild(group);}
+    if(!visibleCharacters){const empty=div('storyboardPickerEmpty');empty.innerHTML='<span aria-hidden="true">◎</span><h3>No saved Cast members</h3><p>Save a character to Cast first, then return here to select its reference screenshots.</p><button class="btn ghost" data-close-cast-picker>Back to storyboard</button>';content.appendChild(empty);$('[data-close-cast-picker]',empty).addEventListener('click',closeStoryboardReferencePicker);}
   }else{
     const folder=picker.folder||'';
     const images=state.media.filter(m=>['image','audio'].includes(m.kind)&&(m.folder||'')===folder&&(!q||(m.name||'').toLowerCase().includes(q)));
@@ -2187,10 +2189,10 @@ function localMagiaStoryboard(idea,seconds,optimize){
   const block=optimize?5:15,count=Math.ceil(seconds/block),base=Date.now();
   return Array.from({length:count},(_,index)=>{
     const duration=Math.min(block,seconds-index*block),card=storyboardNewCard(index),progress=index/Math.max(1,count-1),beat=index===0?'Establish the protagonist, setting, style, and initial emotional situation through a specific opening action.':index===count-1?'Complete the promised outcome and emotional resolution, then finish on a satisfying final image; do not end mid-action.':progress<.5?'Develop the discovery or pursuit through a new causal action that advances the story.':progress<.8?'Deliver the central encounter and emotional turn through visible behavior and reaction.':'Show the consequences of the emotional turn and prepare the final resolution.';
-    return {...card,id:'magia-'+base+'-'+index,name:'Scene '+(index+1),prompt:'Scene '+(index+1)+' of '+count+', '+duration.toFixed(2)+' seconds. '+(index?'Continue from the exact final frame of the previous scene. ':'Begin the story. ')+beat+' Preserve this complete story intent without showing later beats early: '+idea,original_prompt:idea,continue_previous:index>0,params:{...(card.params||{}),frames:Math.max(8,Math.round(duration*24))},duration_seconds:duration,character_ids:[...(magiaCard.character_ids||[])],character_reference_ids:{...(magiaCard.character_reference_ids||{})},reference_media_ids:[...(magiaCard.reference_media_ids||[])],prompt_skill_id:magiaCard.prompt_skill_id||null};
+    return {...card,id:'magia-'+base+'-'+index,name:'Scene '+(index+1),prompt:'Scene '+(index+1)+' of '+count+', '+duration.toFixed(2)+' seconds. '+(index?'Continue from the exact final frame of the previous scene. ':'Begin the story. ')+beat+' Preserve this complete story intent without showing later beats early: '+idea,original_prompt:idea,continue_previous:index>0,params:{...(card.params||{}),frames:Math.max(8,Math.round(duration*24))},duration_seconds:duration,character_ids:[...(magiaCard.character_ids||[])],character_reference_ids:{...(magiaCard.character_reference_ids||{})},reference_media_ids:[...(magiaCard.reference_media_ids||[])],prompt_skill_id:magiaCard.prompt_skill_id||null,required_prompt_skill_id:magiaCard.prompt_skill_id||null};
   });
 }
-async function createMagiaStoryboard(){const idea=$('#magiaIdea').value.trim(),seconds=parseFloat($('#magiaDuration').value),optimize=$('#magiaOptimize').checked;if(!idea){toast('Describe the idea first','err');$('#magiaIdea').focus();return;}if(!Number.isFinite(seconds)||seconds<1){toast('Enter a duration of at least one second','err');return;}const count=Math.ceil(seconds/(optimize?5:15));if(count>24){toast('Magia supports up to 24 scenes for this scene length','err');return;}const button=$('#magiaCreate'),draft=ensureStoryboardDraft(),skill=storyboardPromptSkill(magiaCard);button.disabled=true;button.querySelector('span').textContent='Building storyboard…';try{let result;try{result=await api('/api/storyboards/magia',{method:'POST',body:{idea,duration_seconds:seconds,optimize_five_seconds:optimize,use_ai:true,style:(draft.style_profile||{}).prompt||'',skill_direction:promptSkillInstruction(skill),context:{character_ids:magiaCard.character_ids||[],character_reference_ids:magiaCard.character_reference_ids||{},reference_media_ids:magiaCard.reference_media_ids||[],prompt_skill_id:magiaCard.prompt_skill_id||null}}});}catch(error){if(error.status!==404)throw error;result={scenes:localMagiaStoryboard(idea,seconds,optimize),used_ai:false,compatibility_fallback:true};}draft.scenes=result.scenes;if(result.project_style){draft.style_profile={...(draft.style_profile||{}),name:'Magia style',prompt:result.project_style,skill_id:null,source:'magia'};draft.use_project_style=true;}draft.optimize_scenes=false;draft.continuity_review=null;draft.optimized_fingerprint=null;closeMagia();renderStoryboard();scheduleStoryboardSave();$('.storyboardBody').scrollTop=0;toast(result.compatibility_fallback?'Storyboard created. Restart OpenMagia before AI refinement.':(result.used_ai?'Magia prepared ':'Created ')+result.scenes.length+' scene'+(result.scenes.length===1?'':'s'),result.compatibility_fallback?'warn':'ok');}catch(error){toast(error.message,'err');}finally{button.disabled=false;button.querySelector('span').textContent='Create storyboard';}}
+async function createMagiaStoryboard(){const idea=$('#magiaIdea').value.trim(),seconds=parseFloat($('#magiaDuration').value),optimize=$('#magiaOptimize').checked;if(!idea){toast('Describe the idea first','err');$('#magiaIdea').focus();return;}if(!Number.isFinite(seconds)||seconds<1){toast('Enter a duration of at least one second','err');return;}const count=Math.ceil(seconds/(optimize?5:15));if(count>24){toast('Magia supports up to 24 scenes for this scene length','err');return;}const button=$('#magiaCreate'),draft=ensureStoryboardDraft(),skill=storyboardPromptSkill(magiaCard);button.disabled=true;button.querySelector('span').textContent='Building storyboard…';try{let result;try{result=await api('/api/storyboards/magia',{method:'POST',body:{idea,duration_seconds:seconds,optimize_five_seconds:optimize,use_ai:true,style:(draft.style_profile||{}).prompt||'',skill_direction:promptSkillInstruction(skill),context:{character_ids:magiaCard.character_ids||[],character_reference_ids:magiaCard.character_reference_ids||{},reference_media_ids:magiaCard.reference_media_ids||[],prompt_skill_id:magiaCard.prompt_skill_id||null}}});}catch(error){if(error.status!==404)throw error;result={scenes:localMagiaStoryboard(idea,seconds,optimize),used_ai:false,compatibility_fallback:true};}draft.scenes=result.scenes;draft.output={...(draft.output||{}),audio_mode:'silent',audio_notes:'Visual continuity validation pass; add designed sound after picture approval.'};if(result.project_style){draft.style_profile={...(draft.style_profile||{}),name:'Magia style',prompt:result.project_style,skill_id:null,source:'magia'};draft.use_project_style=true;}draft.optimize_scenes=false;draft.continuity_review=null;draft.optimized_fingerprint=null;closeMagia();renderStoryboard();scheduleStoryboardSave();$('.storyboardBody').scrollTop=0;toast(result.compatibility_fallback?'Storyboard created. Restart OpenMagia before AI refinement.':(result.used_ai?'Magia prepared ':'Created ')+result.scenes.length+' scene'+(result.scenes.length===1?'':'s')+' · silent continuity pass',result.compatibility_fallback?'warn':'ok');}catch(error){toast(error.message,'err');}finally{button.disabled=false;button.querySelector('span').textContent='Create storyboard';}}
 function storyboardIdentityNotes(card){
   const notes=(card.character_ids||[]).map(id=>state.characters.find(c=>c.id===id)).filter(Boolean).map(c=>c.name+': '+String(c.description||c.identity_notes||'Preserve this character’s established identity and anatomy.').trim());
   return notes.length?' Cast identity notes (text only; these are not Picture references): '+notes.join(' '):'';
@@ -2228,13 +2230,13 @@ async function refineStoryboardCard(card,el){
   const prompt=String(card.prompt||'').trim();if(!prompt){toast('Write this scene prompt first','err');return;}const button=$('.storyboardRefine',el),draft=ensureStoryboardDraft(),index=storyboardDraft.scenes.indexOf(card);button.disabled=true;button.textContent='Opening…';
   try{storyboardRefineTarget={card,index,skill:await storyboardSkillWithSpecification(card),draft};openPromptSheet('storyboard');}catch(error){storyboardRefineTarget=null;toast(error.message,'err');}finally{button.disabled=false;button.textContent='✦ Refine';}
 }
-function continuityReviewFingerprint(draft){return JSON.stringify({style:(draft.style_profile||{}).prompt||'',scenes:(draft.scenes||[]).map(s=>({prompt:s.prompt||'',frames:+(s.params||{}).frames||+(draft.output||{}).frames||56,cast:s.character_ids||[],refs:s.character_reference_ids||{},media:s.reference_media_ids||[],continue:s.continue_previous!==false,mode:s.continuity_mode||'frame'}))});}
+function continuityReviewFingerprint(draft){return JSON.stringify({style:(draft.style_profile||{}).prompt||'',scenes:(draft.scenes||[]).map(s=>({prompt:s.prompt||'',frames:+(s.params||{}).frames||+(draft.output||{}).frames||56,duration:s.duration_seconds||null,skill:s.prompt_skill_id||null,requiredSkill:s.required_prompt_skill_id||null,cast:s.character_ids||[],refs:s.character_reference_ids||{},media:s.reference_media_ids||[],continue:s.continue_previous!==false,mode:s.continuity_mode||'frame'}))});}
 function closeContinuityReview(){continuityAuditState=null;const sheet=$('#continuityReviewSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
 function renderContinuityReview(result,draft,fingerprint){
   continuityAuditState={result,draft,fingerprint};const issues=result.issues||[],wrap=$('#continuityReviewIssues');wrap.innerHTML='';
   $('#continuityReviewStatus').textContent=issues.length?'Fix or confirm '+issues.length+' transition'+(issues.length===1?'':'s')+' before generating.':'No continuity conflicts found.';
   if(!issues.length)wrap.innerHTML='<div class="continuityIssue continuityClear"><h3>Ready to generate</h3><p>If this scene continues a rendered clip, confirm its last frame matches the intended cast, props, placement, and direction.</p></div>';
-  issues.forEach((issue,i)=>{const scene=draft.scenes[issue.scene_index],el=div('continuityIssue');el.innerHTML='<h3>'+esc((scene&&scene.name)||('Scene '+(issue.scene_index+1)))+' · '+esc(issue.title)+'</h3><p>'+esc(issue.detail)+'</p><label>How to fix<select class="txt" data-continuity-resolution="'+i+'"><option value="">Choose a fix…</option><option value="established">Keep — it is visible in the previous frame</option><option value="introduced">Keep — this scene shows how it appears</option><option value="edit">Edit the scene prompt or references</option></select></label>';wrap.appendChild(el);});
+  issues.forEach((issue,i)=>{const scene=draft.scenes[issue.scene_index],el=div('continuityIssue'),hard=['duration','skill','resource','physical'].includes(issue.category);el.innerHTML='<h3>'+esc((scene&&scene.name)||('Scene '+(issue.scene_index+1)))+' · '+esc(issue.title)+'</h3><p>'+esc(issue.detail)+'</p><label>How to fix<select class="txt" data-continuity-resolution="'+i+'"><option value="">Choose a fix…</option>'+(hard?'':'<option value="established">Keep — it is visible in the previous frame</option><option value="introduced">Keep — this scene shows how it appears</option>')+'<option value="edit">Edit the scene prompt or references</option></select></label>';wrap.appendChild(el);});
   const sheet=$('#continuityReviewSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#continuityReviewConfirm').textContent=issues.length?'Confirm and generate':'Generate storyboard';$('#continuityReviewConfirm').focus({preventScroll:true});
 }
 async function requestContinuityReview(draft){
@@ -2484,6 +2486,8 @@ function openPromptSheet(mode = 'scene') {
   const authoredSeconds=storyboardMode?((+(target.card.params||{}).frames||56)/24):(!styleMode&&!imageMode?inferPromptSeconds(sourceIdea):null);
   if(authoredSeconds&&!storyboardMode)applyDurationSeconds(authoredSeconds);
   $('#guideDuration').value = (authoredSeconds || ((+$('#genFrames').value || 56) / 24)).toFixed(2);
+  $('#guideDuration').readOnly=storyboardMode;
+  $('#guideDuration').title=storyboardMode?'Storyboard timing is locked here. Change scene timing in the storyboard card.':'';
   $('#refineUpdateStyleOption').hidden=styleMode||storyboardMode||!hasProjectStyle;
   $('#refineUpdateStyle').checked=false;
   const context=storyboardMode?storyboardFormatContext(target.card,target.index):null;
@@ -2527,17 +2531,18 @@ async function formatFromSheet(useAi) {
   if (!idea) { toast('Describe what happens first', 'err'); return null; }
   const requestedSeconds=+$('#guideDuration').value;
   if(!styleMode&&!imageMode&&!storyboardMode&&requestedSeconds>0)applyDurationSeconds(requestedSeconds);
-  const frames = imageMode ? 5 : storyboardMode?clamp(Math.round((requestedSeconds||((+(target.card.params||{}).frames||56)/24))*24),8,360):clamp(($('#genFrames').value | 0), 8, 360);
+  const frames = imageMode ? 5 : storyboardMode?clamp(+(target.card.params||{}).frames||56,8,360):clamp(($('#genFrames').value | 0), 8, 360);
   const style = styleMode?$('#genStyle').value.trim():storyboardMode?((target.draft.use_project_style===false?'':(target.draft.style_profile||{}).prompt)||''):(state.style_enabled===false?'':$('#genStyle').value.trim());
   const skill=storyboardMode?target.skill:activePromptSkill;
   const context=storyboardMode?storyboardFormatContext(target.card,target.index):singleSceneFormatContext();
   const answers = styleMode ? { medium: $('#styleMedium').value.trim(), palette: $('#stylePalette').value.trim(), camera: $('#styleCamera').value.trim(), graphics: $('#styleGraphics').value.trim(), invariants: $('#styleInvariants').value.trim() }
-    : { ...readGuideAnswers(), prompt_skill_id:skill&&skill.id, skill_instruction: promptSkillInstruction(skill), continuity:context.continuity };
+    : { ...readGuideAnswers(), prompt_skill_id:skill&&skill.id, skill_instruction: promptSkillInstruction(skill), continuity:context.continuity,
+        generation_safety:storyboardMode?'Preserve exactly '+frames+' frames ('+(frames/24).toFixed(2)+' seconds), one clear chronological beat, and the existing handoff. Do not repeat shared instructions or invent extra cuts.':'' };
   try {
     const out = await api('/api/prompt/format', { method: 'POST', body: { idea, style, frames, answers, task: styleMode ? 'style' : imageMode?'image':'scene',
       character_ids: context.character_ids, character_reference_ids:context.character_reference_ids, reference_media_ids:context.reference_media_ids,
       continuity_reference:context.continuity_reference, mode:context.mode, use_ai: useAi, prompt_skill_id:skill&&skill.id } });
-    if(storyboardMode&&out.frames){target.card.params={...(target.card.params||{}),frames:out.frames};$('#guideDuration').value=(out.duration_seconds||out.frames/24).toFixed(2);}
+    if(storyboardMode){$('#guideDuration').value=(frames/24).toFixed(2);}
     else if(!styleMode&&!imageMode&&out.frames){
       $('#genFrames').value=out.frames;
       $('#guideDuration').value=(out.duration_seconds||out.frames/24).toFixed(2);
@@ -2556,7 +2561,7 @@ async function applyPromptTemplate() {
   } else if(refineMode==='storyboard'){
     const target=storyboardRefineTarget,card=target.card;
     card.original_prompt=card.original_prompt||$('#guideIdea').value.trim();card.refined_prompt=result.out.expanded_idea;card.prompt=result.out.prompt;
-    card.skill_compilation=result.out.skill_compilation;card.prompt_skill_id=(result.skill&&result.skill.id)||card.prompt_skill_id||null;
+    card.skill_compilation=result.out.skill_compilation;card.prompt_skill_id=(result.skill&&result.skill.id)||card.prompt_skill_id||null;card.required_prompt_skill_id=card.required_prompt_skill_id||card.prompt_skill_id||null;
     card.guide_answers={...(card.guide_answers||{}),...result.answers,continuity:result.context.continuity};
     target.draft.continuity_review=null;target.draft.optimized_fingerprint=null;renderStoryboard();scheduleStoryboardSave();
   } else {

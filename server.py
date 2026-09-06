@@ -7,6 +7,7 @@ to a single MP4 via the NLE compositor (nle.py).
 """
 import json
 import hashlib
+import math
 import os
 import platform
 import queue as stream_queue
@@ -1290,6 +1291,9 @@ def create_storyboard_batch(project, payload):
                  "guide_answers": {**audio_answers, **dict(card.get("guide_answers") or {})},
                  "template_id": card.get("template_id"), "generation_type": "video",
                  "prompt_skill_id": card.get("prompt_skill_id"),
+                 "required_prompt_skill_id": card.get("required_prompt_skill_id") or card.get("prompt_skill_id"),
+                 "duration_seconds": card.get("duration_seconds"),
+                 "optimize_references": card.get("optimize_references", True) is not False,
                  "style_profile": dict(style_profile) if use_style else {},
                  "use_project_style": use_style, "chain": False,
                  "source_media_id": source_media_id, "source_frame": "last",
@@ -1563,6 +1567,7 @@ def make_magia_storyboard(payload, project, use_model=True):
             "id": f"magia-{uuid.uuid4().hex[:10]}", "name": f"Scene {index + 1}", "prompt": prompt,
             "character_ids": character_ids, "character_reference_ids": dict(context.get("character_reference_ids") or {}),
             "reference_media_ids": reference_ids, "prompt_skill_id": selected_skill_id,
+            "required_prompt_skill_id": selected_skill_id, "duration_seconds": round(frames / FPS, 3),
             "continue_previous": index > 0, "source_media_id": None, "source_name": "",
             "params": {"frames": frames},
         })
@@ -1606,7 +1611,7 @@ def validate_generation_prompt(prompt, frames, actual_reference_count, continuat
     # multi-character prompt beyond 9k. Structural validation below catches
     # the harmful nested timelines; reserve this ceiling for truly runaway
     # recursive prompts.
-    if len(text) > 14000:
+    if len(text) > 7000:
         raise ValueError("This scene prompt is too dense for reliable H3 generation. Split it into shorter scenes or remove repeated instructions.")
     timeline = analyze_cut_timeline(text, max(8, min(MAX_FRAMES, int(frames or 56))) / FPS)
     if timeline["errors"]:
@@ -1771,6 +1776,75 @@ def h3_reference_args(references):
         for path in item.get("paths", []):
             args.extend([flag, str(path)])
     return args
+
+
+def build_reference_atlas(project, references, width=768, height=1344):
+    """Pack multiple environment references into one H3 vision presentation.
+
+    H3 decodes and resizes every reference regardless of its JPEG/PNG byte
+    size, so ordinary file compression does not reduce Qwen vision attention.
+    A contact atlas preserves several geometry views while consuming one
+    Picture slot. Character and audio references stay independent.
+    """
+    paths = [Path(path) for item in references for path in item.get("paths", [])]
+    if len(paths) < 2:
+        return references[0] if references else None
+    signature = hashlib.sha256(("reference-atlas-v2\n" + "\n".join(
+        f"{path.resolve()}:{path.stat().st_mtime_ns}:{path.stat().st_size}"
+        for path in paths)).encode()).hexdigest()[:16]
+    cache = proj_media_dir(project) / ".reference-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    output = cache / f"environment-{signature}.jpg"
+    if not output.is_file():
+        columns = min(3, math.ceil(math.sqrt(len(paths))))
+        rows = math.ceil(len(paths) / columns)
+        tile_w, tile_h = width // columns, height // rows
+        filters, labels, layout = [], [], []
+        for index in range(len(paths)):
+            label = f"r{index}"
+            inner_w, inner_h = max(8, tile_w - 8), max(8, tile_h - 8)
+            filters.append(
+                f"[{index}:v]scale={inner_w}:{inner_h}:force_original_aspect_ratio=increase,"
+                f"crop={inner_w}:{inner_h},pad={tile_w}:{tile_h}:4:4:black[{label}]")
+            labels.append(f"[{label}]")
+            layout.append(f"{(index % columns) * tile_w}_{(index // columns) * tile_h}")
+        cmd = ["ffmpeg", "-y", "-v", "error"]
+        for path in paths:
+            cmd.extend(["-i", str(path)])
+        cmd.extend(["-filter_complex", ";".join(filters) + ";" + "".join(labels)
+                    + f"xstack=inputs={len(paths)}:layout={'|'.join(layout)}:fill=black[out]",
+                    "-map", "[out]", "-frames:v", "1", "-q:v", "3", str(output)])
+        completed = subprocess.run(cmd, capture_output=True, text=True)
+        if completed.returncode != 0 or not output.is_file():
+            raise RuntimeError("Could not optimize environment references into an H3 atlas: "
+                               + completed.stderr[-500:])
+    names = [str(item.get("name") or "Environment view") for item in references]
+    return {"name": f"Environment reference atlas ({len(paths)} views)",
+            "description": ("One contact atlas containing these location authorities: "
+                            + "; ".join(names)
+                            + ". Treat every tile as the same physical location from a different viewpoint; "
+                              "preserve shared façade, balcony, skyline, material, and weather geometry."),
+            "paths": [output], "kind": "visual_reference", "atlas_sources": len(paths)}
+
+
+def optimize_generation_references(project, references):
+    """Keep primary geometry full-size and atlas only secondary location views."""
+    environment = [item for item in references if item.get("kind") == "visual_reference"]
+    if len(environment) < 3:
+        return references
+    primary, secondary = environment[0], environment[1:]
+    primary = {**primary, "description": (
+        "PRIMARY ENVIRONMENT GEOMETRY AUTHORITY. Preserve this exact balcony floor, railing, panel orientation, "
+        "façade side, materials, skyline direction, scale, and walkable boundaries; never fuse geometry from other views.")}
+    atlas = build_reference_atlas(project, secondary)
+    atlas["description"] = ("SECONDARY CAMERA AND BUILDING CONTEXT. Its separated tiles show alternate views of the same "
+                            "location; use them for parallax and off-axis background coverage only. They may not replace, "
+                            "rotate, or redesign the primary balcony geometry.")
+    first = min(index for index, item in enumerate(references)
+                if item.get("kind") == "visual_reference")
+    kept = [item for item in references if item.get("kind") != "visual_reference"]
+    kept[min(first, len(kept)):min(first, len(kept))] = [primary, atlas]
+    return kept
 
 def scene_identity_text(scene, project):
     """Text-only identity locks used when I2VA cannot accept reference images."""
@@ -1976,7 +2050,7 @@ def improve_idea_locally(idea, answers, project_style=""):
             raise ValueError("Invalid authored CUT timeline: " + " ".join(authored["errors"]))
         continuity = str(answers.get("continuity") or "").strip()
         return (((continuity + " ") if continuity else "") + idea.strip(), False)
-    context_keys = {"setting", "camera", "transitions", "pacing", "text", "sound", "music", "continuity", "continuity_review", "reference_audio"}
+    context_keys = {"setting", "camera", "transitions", "pacing", "text", "sound", "music", "continuity", "continuity_review", "reference_audio", "generation_safety"}
     context = "; ".join(f"{k}: {v}" for k, v in answers.items() if k in context_keys and v)
     skill_direction = str(answers.get("skill_instruction") or "").strip()
     seconds = max(.33, float(answers.get("_duration_seconds") or 2.33))
@@ -2051,6 +2125,42 @@ def audit_storyboard_continuity(payload, project, use_model=True):
     style = str((payload.get("style_profile") or {}).get("prompt") or "").strip()
     issues = []
     for index, scene in enumerate(scenes):
+        frames = max(8, min(MAX_FRAMES, int((scene.get("params") or {}).get("frames") or 56)))
+        authored_seconds = scene.get("duration_seconds")
+        if authored_seconds is not None and abs(frames / FPS - float(authored_seconds)) > (1 / FPS):
+            issues.append({"scene_index": index, "severity": "block", "category": "duration",
+                           "title": "Scene duration changed during Refine",
+                           "detail": f"This card was authored as {float(authored_seconds):.2f}s, but now contains {frames} frames ({frames / FPS:.2f}s). Restore the authored duration before generation.",
+                           "fact": "Storyboard duration must remain fixed during Refine"})
+        required_skill = str(scene.get("required_prompt_skill_id") or "").strip()
+        selected_skill = str(scene.get("prompt_skill_id") or "").strip()
+        if required_skill and selected_skill != required_skill:
+            issues.append({"scene_index": index, "severity": "block", "category": "skill",
+                           "title": "Required prompt skill is missing",
+                           "detail": f"This card requires {required_skill}, but Refine left {selected_skill or 'no skill'} selected. Restore the required skill before generation.",
+                           "fact": f"Required prompt skill: {required_skill}"})
+        environment_refs = len(scene.get("reference_media_ids") or [])
+        character_refs = sum(len(ids or []) for ids in
+                             dict(scene.get("character_reference_ids") or {}).values())
+        visual_refs = character_refs + (min(1, environment_refs)
+                                        if scene.get("optimize_references", True) is not False
+                                        else environment_refs)
+        raw_size = len(style) + len(str(scene.get("prompt") or ""))
+        if raw_size > 6000 or visual_refs > 6:
+            issues.append({"scene_index": index, "severity": "block", "category": "resource",
+                           "title": "H3 prompt or reference load is too large",
+                           "detail": f"This scene carries {raw_size} prompt characters and {visual_refs} visual references. Keep the combined instructions under 6,000 characters and use at most four opening-scene visual references.",
+                           "fact": "H3 causal-attention resource budget"})
+        motion_text = str(scene.get("prompt") or "").lower()
+        unsafe_barrier = re.search(
+            r"(?:through|across|around the outer end of|over)\s+(?:the\s+)?(?:balcony\s+)?(?:fence|divider|panel|railing)",
+            motion_text)
+        if unsafe_barrier or ("swing" in motion_text and any(
+                word in motion_text for word in ("divider", "railing", "panel"))):
+            issues.append({"scene_index": index, "severity": "block", "category": "physical",
+                           "title": "Route can intersect a balcony barrier",
+                           "detail": "The movement asks the subject to cross or swing around fixed balcony architecture. Use a visible doorway, open gate, unobstructed floor path, or stop before the barrier; never let the body pass through a panel or railing.",
+                           "fact": "Physically traversable route around fixed architecture"})
         skill_compilation = None
         try:
             skill_compilation = compile_skill_contract(scene.get("prompt_skill_id"))
@@ -3164,11 +3274,15 @@ def run_job(scene_id, project):
             "paths": [source_frame],
             "kind": "continuity_reference",
         }] + chars
+    if scene.get("optimize_references", True) is not False:
+        generation_refs = optimize_generation_references(project, generation_refs)
     prompt = ((image_idea if image_formatted and not chain_frame else format_image_prompt(
                   idea=image_idea, style=(scene.get("style_profile") or {}).get("prompt", ""),
                   mode="ref2va" if generation_refs else ("i2va" if chain_frame else "t2va"),
                   characters=generation_refs, answers=scene.get("guide_answers") or {}))
               if is_image else build_prompt(scene, project, ref2va, chain_frame, generation_refs))
+    validate_generation_prompt(prompt, scene.get("params", {}).get("frames", 56),
+                               1 if chain_frame else visual_reference_count(generation_refs), continuation=bool(chain_frame))
     # Persist exactly what was sent, independently from the editable source
     # prompt. This makes every generation auditable and reproducible.
     with lock:
@@ -4800,7 +4914,9 @@ class Handler(BaseHTTPRequestHandler):
                 reference_fields = {"character_ids", "character_reference_ids", "reference_media_ids"}
                 if s.get("status") in {"queued", "running"} and reference_fields.intersection(b):
                     return self._json({"error": "Cast and visual references are locked while a scene is queued or generating."}, 409)
-                for k in ("name", "prompt", "chain", "source_media_id", "source_frame"):
+                for k in ("name", "prompt", "original_prompt", "refined_prompt", "chain", "source_media_id", "source_frame",
+                          "prompt_skill_id", "required_prompt_skill_id", "duration_seconds", "continuity_mode", "guide_answers",
+                          "style_profile", "use_project_style", "optimize_references"):
                     if k in b:
                         s[k] = b[k]
                 if "character_ids" in b:
