@@ -239,17 +239,17 @@ SHEET_RECIPES = [
     {"id": "turn-6", "name": "Full turn · 6 views",
      "tagline": "Front, three-quarter, sides, back, and a face shot (~5 s)",
      "frames": 120,
-     "script": ("[0.00-4.00 seconds] Tight full shot of the subject. The camera makes exactly one smooth fixed-speed "
-                "clockwise 360-degree orbit while the subject remains frozen: square front at 0.00 seconds; a clear "
-                "front three-quarter view at 0.33 seconds; the subject's left profile at 1.00 seconds; exact square back "
-                "at 2.00 seconds; the subject's right profile at 3.00 seconds; and square front again at 4.00 seconds. "
+     "script": ("[0.00-3.80 seconds] Tight full shot of the subject. The camera makes exactly one smooth fixed-speed "
+                "clockwise 270-degree orbit while the subject remains frozen: square front at 0.00 seconds; a clear "
+                "front three-quarter view at 0.80 seconds; the subject's left profile at 1.70 seconds; exact square back "
+                "at 2.70 seconds; and the subject's right profile at 3.70 seconds. Stop the orbit on that right profile. "
                 "Do not slow down, reverse direction, pause, cut, or change the subject between checkpoints. "
-                "[4.00-5.00 seconds] The camera pushes straight in from the returned front view. Locked-off close-up "
+                "[3.80-5.00 seconds] Cut directly to a square front view and push straight in. Locked-off close-up "
                 "with the subject square to camera, both sides visually balanced, and the defining front features fully "
                 "visible. Ends on an unmistakable front-on identity close-up. Do not attempt another angle here; the "
-                "three-quarter reference comes from the verified orbit."),
-     "extract": [(0.05, "front"), (0.33, "three-quarter"), (1.00, "left side"), (2.00, "back"),
-                 (3.00, "right side"), (4.82, "front face")]},
+                "three-quarter reference comes from the orbit."),
+     "extract": [(0.05, "front"), (0.80, "three-quarter"), (1.70, "left side"), (2.70, "back"),
+                 (3.70, "right side"), (4.82, "front face")]},
     {"id": "turn-4", "name": "Quick turn · 4 views",
      "tagline": "Back, side, front, and a face shot (~3 s)",
      "frames": 72,

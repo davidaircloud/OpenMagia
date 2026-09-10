@@ -581,8 +581,10 @@ class TimelineCompositionTests(unittest.TestCase):
         with mock.patch.object(server.subprocess, "run", return_value=completed):
             times, diagnostics = server.analyze_sheet_motion("sheet.mp4")
         self.assertTrue(diagnostics["adaptive"])
-        self.assertAlmostEqual(diagnostics["orbitEnd"], 4.0)
-        self.assertNotEqual(times["left side"], 1.0)
+        self.assertAlmostEqual(diagnostics["orbitEnd"], 3.8)
+        self.assertGreater(times["left side"], times["three-quarter"])
+        self.assertGreater(times["back"], times["left side"])
+        self.assertGreater(times["right side"], times["back"])
         self.assertTrue(diagnostics["unstable"])
 
     def test_overlapping_clip_snaps_to_nearest_sequential_position(self):

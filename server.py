@@ -128,7 +128,7 @@ FORMATTER_MODEL = CFG["formatter_model"]
 MODEL_SOURCE_FILE = DATA / "model-sources.json"
 MODEL_REGISTRY_FILE = DATA / "model-registry.json"
 LORA_ROOT = ROOT / "models" / "loras"
-SHEET_EXTRACTION_VERSION = 2
+SHEET_EXTRACTION_VERSION = 3
 
 MODEL_BACKENDS = [
     {"id":"h3-metal", "name":"MiniMax H3 · Metal", "provider":"h3.c", "platforms":["darwin-arm64"],
@@ -947,8 +947,9 @@ def load_project():
         generation_media_repaired = repair_generation_placeholders(p)
         sheets_repaired = repair_completed_sheets(p)
         sheet_views_upgraded = upgrade_sheet_extractions(p)
+        sheets_promoted = promote_completed_sheets(p)
         timeline_repaired = repair_timeline_overlaps(p)
-        if media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or timeline_repaired:
+        if media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted or timeline_repaired:
             save_project(p)
         return p
     p = new_project()
@@ -971,6 +972,7 @@ def load_project_slug(slug):
     generation_media_repaired = repair_generation_placeholders(p)
     sheets_repaired = repair_completed_sheets(p)
     sheet_views_upgraded = upgrade_sheet_extractions(p)
+    sheets_promoted = promote_completed_sheets(p)
     changed = False
     media = p.get("media", [])
     stamp = max([float(m.get("created") or 0) for m in media], default=0.0)
@@ -984,7 +986,7 @@ def load_project_slug(slug):
             stamp += 1
             m["created"] = stamp
             changed = True
-    if changed or media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded:
+    if changed or media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted:
         save_project(p)
     return p
 
@@ -1270,6 +1272,9 @@ def create_storyboard_batch(project, payload):
                     "source_media_id": source_media_id,
                     "continuity_mode": continuity_mode}
         validation_refs = scene_all_references(proposed, project)
+        validate_reference_availability(validation_refs)
+        if source_media_id and source_media_id != previous_media_id:
+            validate_source_media_availability(project, source_media_id)
         if source_media_id and continuity_mode == "reference":
             validation_refs = [{"name": "Previous scene final frame", "paths": [Path("__continuity__.png")],
                                 "kind": "continuity_reference"}] + validation_refs
@@ -1667,6 +1672,56 @@ def character_image_ids(c):
     if not ids and c.get("image"):
         ids = [c["image"]]
     return list(ids)
+
+
+def promote_ready_sheet(project, sheet, images=None):
+    """Turn a completed sheet into Cast without a second confirmation step."""
+    available = [frame.get("mediaId") for frame in sheet.get("frames", [])
+                 if frame.get("mediaId") and any(
+                     media.get("id") == frame.get("mediaId") and media.get("kind") == "image"
+                     for media in project.get("media", []))]
+    chosen = list(dict.fromkeys(images if images is not None else available))
+    chosen = [media_id for media_id in chosen if media_id in available]
+    if not chosen:
+        raise ValueError("The completed character sheet has no available screenshots.")
+    existing = next((character for character in project.setdefault("characters", [])
+                     if (character.get("composed") or {}).get("sheet_id") == sheet.get("id")), None)
+    if existing:
+        project["sheets"] = [item for item in project.get("sheets", []) if item.get("id") != sheet.get("id")]
+        return existing
+    character = {
+        "id": uuid.uuid4().hex[:10],
+        "name": str(sheet.get("name") or "").strip() or "Character",
+        "description": str(sheet.get("identity") or ""),
+        "images": chosen, "image": chosen[0],
+        "composed": {"sheet_id": sheet.get("id"), "recipe": sheet.get("recipe"), "style": sheet.get("style")},
+    }
+    project["characters"].append(character)
+    project["sheets"] = [item for item in project.get("sheets", []) if item.get("id") != sheet.get("id")]
+    return character
+
+
+def validate_reference_availability(references):
+    """Reject missing local inputs before a generation is accepted or queued."""
+    missing = []
+    for reference in references:
+        for path in reference.get("paths", []):
+            path = Path(path)
+            if not path.is_file():
+                missing.append(f"{reference.get('name') or 'Reference'} ({path.name})")
+    if missing:
+        raise ValueError("Reference media is unavailable: " + ", ".join(missing) +
+                         ". Remove or replace it, then generate again.")
+
+
+def validate_source_media_availability(project, media_id):
+    if not media_id:
+        return
+    media = next((item for item in project.get("media", []) if item.get("id") == media_id), None)
+    unavailable_status = media and media.get("status") in {"queued", "running", "error"}
+    if not media or unavailable_status or not media.get("src") or not abs_media(project, media).is_file():
+        name = (media or {}).get("name") or "Opening-frame reference"
+        raise ValueError(f"Reference media is unavailable: {name}. Remove or replace it, then generate again.")
 
 
 def prioritized_character_image_ids(character, project):
@@ -2601,18 +2656,22 @@ def analyze_sheet_motion(video, recipe_id="turn-6", sample_fps=8):
         def mae(a, b):
             return sum(abs(x - y) for x, y in zip(a, b)) / frame_size
 
-        # The prompt defines explicit semantic checkpoints over four seconds.
+        # The prompt defines explicit semantic checkpoints over a 270-degree
+        # orbit.  A full 360 plus a front close-up made H3 spend the first
+        # four seconds on the useful 270-degree arc and then jump straight to
+        # the close-up; the old quarter-turn timestamps consequently shifted
+        # every semantic label after the opening front view.
         # Do not infer orientation from pixel similarity: symmetric clothing,
         # coats, masks, and backs can look more like the first frame than the
         # actual returning front view and would silently swap view labels.
-        orbit_end = 4.0
+        orbit_end = 3.8
 
         targets = {
             "front": 0.05,
-            "three-quarter": orbit_end / 12.0,
-            "left side": orbit_end / 4.0,
-            "back": orbit_end / 2.0,
-            "right side": orbit_end * 3.0 / 4.0,
+            "three-quarter": 0.80,
+            "left side": 1.70,
+            "back": 2.70,
+            "right side": 3.70,
             "front face": min((len(samples) - 1) / sample_fps, 4.82),
         }
 
@@ -2742,6 +2801,26 @@ def upgrade_sheet_extractions(project):
             if sheet.get("extractionUpgradeError") != message:
                 sheet["extractionUpgradeError"] = message
                 changed = True
+    return changed
+
+
+def promote_completed_sheets(project):
+    """Automatically save every usable completed composition to Cast.
+
+    Keeping this as a load-time migration also heals projects whose worker
+    finished under an older OpenMagia build and left a confirmation tile.
+    """
+    changed = False
+    for sheet in list(project.get("sheets", [])):
+        if sheet.get("status") != "ready":
+            continue
+        try:
+            promote_ready_sheet(project, sheet)
+            changed = True
+        except ValueError:
+            # Preserve an incomplete legacy draft so its missing screenshots
+            # remain inspectable instead of silently discarding it.
+            continue
     return changed
 
 
@@ -3732,6 +3811,7 @@ def run_sheet_job(sheet_id, project):
             sheet["sheetDiagnostics"] = diagnostics
             sheet["extractionVersion"] = SHEET_EXTRACTION_VERSION
             sheet["status"] = "ready"
+            promote_ready_sheet(project, sheet)
             save_project(project)
     except Exception as e:
         with lock:
@@ -4457,25 +4537,21 @@ class Handler(BaseHTTPRequestHandler):
                 latest = load_project()
                 sh = next((s for s in latest.get("sheets", []) if s["id"] == ms.group(1)), None)
                 if not sh:
+                    saved = next((c for c in latest.get("characters", [])
+                                  if (c.get("composed") or {}).get("sheet_id") == ms.group(1)), None)
+                    if saved:
+                        return self._json(saved)
                     return self._json({"error": "no such sheet"}, 404)
                 if sh.get("status") != "ready":
                     return self._json({"error": "this sheet is not ready yet"}, 400)
                 images = list(dict.fromkeys(b.get("images") or []))
-                if not images:
-                    return self._json({"error": "Select at least one view before saving."}, 400)
-                if len(images) > MAX_REFERENCES:
-                    return self._json({"error": f"A character supports at most {MAX_REFERENCES} reference images."}, 400)
-                for mid in images:
-                    m = next((x for x in latest["media"] if x["id"] == mid and x.get("kind") == "image"), None)
-                    if not m:
-                        return self._json({"error": "a selected frame is missing from the media bin"}, 400)
-                c = {"id": uuid.uuid4().hex[:10],
-                     "name": str(b.get("name") or "").strip() or sh.get("name") or "Character",
-                     "description": str(b.get("description") if b.get("description") is not None else (sh.get("identity") or "")),
-                     "images": images, "image": images[0]}
-                c["composed"] = {"sheet_id": sh["id"], "recipe": sh.get("recipe"), "style": sh.get("style")}
-                latest["characters"].append(c)
-                latest["sheets"] = [s for s in latest["sheets"] if s["id"] != sh["id"]]
+                try:
+                    c = promote_ready_sheet(latest, sh, images or None)
+                except ValueError as error:
+                    return self._json({"error": str(error)}, 400)
+                c["name"] = str(b.get("name") or "").strip() or c["name"]
+                if b.get("description") is not None:
+                    c["description"] = str(b.get("description") or "")
                 save_project(latest)
             return self._json(c)
 
@@ -4559,6 +4635,8 @@ class Handler(BaseHTTPRequestHandler):
                 # that anchor with Ref2VA, so Cast images do not consume the
                 # nine-reference budget in this mode; identity notes persist.
                 selected_refs = scene_all_references(proposed, proj)
+                validate_reference_availability(selected_refs)
+                validate_source_media_availability(proj, b.get("source_media_id"))
                 if b.get("source_media_id") and any(item.get("kind") == "audio_reference" for item in selected_refs):
                     raise ValueError("Audio references require Ref2VA and cannot be combined with an exact opening-frame anchor. Remove the opening frame, or use storyboard reference continuity.")
                 references = [] if b.get("source_media_id") else selected_refs
@@ -4753,7 +4831,10 @@ class Handler(BaseHTTPRequestHandler):
             if not target_scene:
                 return self._json({"error": "no such scene"}, 404)
             try:
-                validate_references(scene_all_references(target_scene, proj))
+                target_references = scene_all_references(target_scene, proj)
+                validate_reference_availability(target_references)
+                validate_source_media_availability(proj, target_scene.get("source_media_id"))
+                validate_references(target_references)
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
             retry_ids = [sid]

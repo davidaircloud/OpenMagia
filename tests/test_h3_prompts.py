@@ -1,7 +1,7 @@
 import unittest
 
 from h3_prompts import (MAX_FRAMES, PRESETS, SHEET_RECIPES, duration_for_frames,
-                        analyze_cut_timeline, format_prompt, format_image_prompt, format_sheet_prompt, sheet_extract_times,
+                        analyze_cut_timeline, format_prompt, format_image_prompt, format_sheet_prompt, get_sheet_recipe, sheet_extract_times,
                         validate_references)
 
 
@@ -157,9 +157,18 @@ class SheetPromptTests(unittest.TestCase):
 
     def test_full_turn_takes_three_quarter_from_verified_orbit(self):
         views = dict((label, t) for t, label in sheet_extract_times("turn-6"))
-        self.assertLess(views["three-quarter"], views["left side"])
+        self.assertEqual(views["three-quarter"], 0.80)
+        self.assertEqual(views["left side"], 1.70)
+        self.assertEqual(views["back"], 2.70)
+        self.assertEqual(views["right side"], 3.70)
         self.assertGreater(views["front face"], views["right side"])
         self.assertNotIn("three-quarter face", views)
+
+    def test_full_turn_requests_only_the_required_270_degree_arc(self):
+        script = get_sheet_recipe("turn-6")["script"]
+        self.assertIn("270-degree orbit", script)
+        self.assertIn("Stop the orbit on that right profile", script)
+        self.assertNotIn("360-degree orbit", script)
 
     def test_silent_sheet_and_staging_contract(self):
         prompt = format_sheet_prompt(recipe="turn-4", style="live-action")

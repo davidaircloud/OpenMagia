@@ -477,6 +477,43 @@ function drawFrame(t) {
   const base = vtracks.slice().reverse().find(x => x.clips.length) || null;
   if (base) drawBaseTrack(ctx, base, t);
   for (let i = vtracks.length - 1; i >= 0; i--) if (vtracks[i] !== base) drawOverlayTrack(ctx, vtracks[i], t);
+  renderPreviewTransform();
+}
+
+function previewTransformGeometry(c) {
+  const cv=$('#preview'),stage=$('#previewStage'),m=mediaById(c.mediaId);
+  if(!cv||!stage||!m)return null;
+  const cvRect=cv.getBoundingClientRect(),stageRect=stage.getBoundingClientRect();
+  if(!cvRect.width||!cvRect.height)return null;
+  const el=getVideoEl(m),vw=el.videoWidth||el.naturalWidth||m.w||state.canvas.width,vh=el.videoHeight||el.naturalHeight||m.h||state.canvas.height;
+  const local=clamp(playTime-c.start,0,Math.max(.05,c.out-c.in)),motion=clipMotion(c,local);
+  const scale=Math.max(state.canvas.width/vw,state.canvas.height/vh)*motion.zoom;
+  const sw=vw*scale,sh=vh*scale,pos=c.position||{},dx=(+pos.x||0)*state.canvas.width/100,dy=(+pos.y||0)*state.canvas.height/100;
+  const x=state.canvas.width/2-motion.center.x*sw+dx,y=state.canvas.height/2-motion.center.y*sh+dy;
+  return {left:cvRect.left-stageRect.left+x*cvRect.width/state.canvas.width,top:cvRect.top-stageRect.top+y*cvRect.height/state.canvas.height,width:sw*cvRect.width/state.canvas.width,height:sh*cvRect.height/state.canvas.height,canvasRect:cvRect};
+}
+function selectedPreviewClip(){
+  if(!state||!sel||sel.type!=='clip')return null;const c=findClip(sel.id),tr=c&&trackOfClip(c);
+  return c&&tr&&tr.kind==='video'&&playTime>=c.start-1e-6&&playTime<c.start+(c.out-c.in)?c:null;
+}
+function renderPreviewTransform(){
+  const box=$('#previewTransform');if(!box)return;const c=!playing&&selectedPreviewClip();const g=c&&previewTransformGeometry(c);
+  if(!g){box.classList.remove('on');box.setAttribute('aria-hidden','true');return;}
+  box.style.left=g.left+'px';box.style.top=g.top+'px';box.style.width=g.width+'px';box.style.height=g.height+'px';box.classList.add('on');box.setAttribute('aria-hidden','false');
+}
+function bindPreviewTransform(){
+  const box=$('#previewTransform');if(!box)return;
+  box.addEventListener('pointerdown',e=>{
+    if(e.button!==0)return;const c=selectedPreviewClip(),g=c&&previewTransformGeometry(c);if(!c||!g)return;
+    e.preventDefault();e.stopPropagation();pause();inspectorControlActive=true;box.setPointerCapture&&box.setPointerCapture(e.pointerId);
+    const handle=e.target.dataset.handle||'',startX=e.clientX,startY=e.clientY,startZoom=Math.max(.1,+c.zoom||1),startPos={x:+(c.position||{}).x||0,y:+(c.position||{}).y||0};
+    const centerX=g.left+g.width/2+$('#previewStage').getBoundingClientRect().left,centerY=g.top+g.height/2+$('#previewStage').getBoundingClientRect().top;
+    const startMetric=handle?(handle==='n'||handle==='s'?Math.abs(startY-centerY):handle==='e'||handle==='w'?Math.abs(startX-centerX):Math.hypot(startX-centerX,startY-centerY)):1;
+    const move=ev=>{if(handle){const metric=handle==='n'||handle==='s'?Math.abs(ev.clientY-centerY):handle==='e'||handle==='w'?Math.abs(ev.clientX-centerX):Math.hypot(ev.clientX-centerX,ev.clientY-centerY);c.zoom=clamp(startZoom*metric/Math.max(8,startMetric),.1,8);}else c.position={x:startPos.x+(ev.clientX-startX)/g.canvasRect.width*100,y:startPos.y+(ev.clientY-startY)/g.canvasRect.height*100};drawNow();};
+    const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);inspectorControlActive=false;await putClip(c,handle?{zoom:c.zoom}:{position:c.position},false);renderInspector();drawNow();};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+  });
+  window.addEventListener('resize',renderPreviewTransform);
 }
 
 function drawBaseTrack(ctx, base, t) {
@@ -1018,7 +1055,7 @@ function select(s) {
   $$('.clip').forEach(c => c.classList.remove('sel'));
   $$('.mtile').forEach(c => c.classList.remove('sel'));
   $$('.scene').forEach(c => c.classList.remove('sel'));
-  if (s && s.type === 'clip') { const el = clipElById(s.id); if (el) el.classList.add('sel'); }
+  if (s && s.type === 'clip') { const el = clipElById(s.id); if (el) el.classList.add('sel'); const c=findClip(s.id); if(c&&trackOfClip(c)?.kind==='video')focusClipPreview(c); }
   if (s && s.type === 'media') { const el = document.querySelector('.mtile[data-media="' + s.id + '"]'); if (el) el.classList.add('sel'); }
   if (s && s.type === 'scene') { const el = document.querySelector('.scene[data-scene="' + s.id + '"]'); if (el) el.classList.add('sel'); }
   if (s) setInspectorTab('inspect');
@@ -1026,6 +1063,7 @@ function select(s) {
   const editingInspector = active && $('#inspector').contains(active) && (['INPUT','TEXTAREA','SELECT'].includes(active.tagName) || active.isContentEditable);
   if (!editingInspector) renderInspector();
   updateDetachAudioTool();
+  drawNow();
 }
 
 function updateDetachAudioTool(){
@@ -1796,6 +1834,9 @@ function prioritizedCharacterRefs(character){
   const score=id=>{const name=String((mediaById(id)||{}).name||'').toLowerCase();return name.includes('three-quarter')?1:name.includes('front face')?2:name.includes('front')?0:name.includes('left')?3:name.includes('right')?4:name.includes('back')?5:6;};
   return charImageIds(character).filter(id=>mediaById(id)).map((id,index)=>({id,index})).sort((a,b)=>score(a.id)-score(b.id)||a.index-b.index).map(x=>x.id);
 }
+function readySheetRefs(sheet){
+  return sheet&&sheet.status==='ready'?(sheet.frames||[]).map(frame=>frame.mediaId).filter(id=>mediaById(id)):[];
+}
 function normalizeCharacterReferenceSelection(){
   if(!state)return;
   for(const id of Array.from(selectedCharRefs.keys()))if(!selChars.has(id))selectedCharRefs.delete(id);
@@ -2140,6 +2181,9 @@ function renderStoryboardReferencePicker(){
   }else if(picker.mode==='cast'){
     let visibleCharacters=0;
     for(const character of state.characters){const refs=prioritizedCharacterRefs(character).map(mediaById).filter(Boolean).filter(m=>!q||(character.name+' '+m.name).toLowerCase().includes(q));if(!refs.length)continue;visibleCharacters++;const group=div('storyboardPickerGroup');group.innerHTML='<h3>'+esc(character.name)+'</h3><p>Select only the views this scene needs.</p><div class="storyboardPickerGrid">'+refs.map(m=>'<button class="storyboardPickerItem '+(picker.selected.has(m.id)?'on':'')+'" data-storyboard-pick="'+esc(m.id)+'"><img src="'+esc(mediaUrl(m))+'" alt=""><span>'+esc((m.name||character.name).replace(character.name+' · ','').replace(character.name+' - ',''))+'</span>'+(picker.selected.has(m.id)?'<b>✓</b>':'')+'</button>').join('')+'</div>';content.appendChild(group);}
+    // A completed character sheet is shown in the Cast tab, so it must also
+    // be selectable here. It is promoted to a saved character when applied.
+    for(const sheet of (state.sheets||[]).filter(item=>item.status==='ready')){const refs=readySheetRefs(sheet).map(mediaById).filter(Boolean).filter(m=>!q||((sheet.name||'')+' '+m.name).toLowerCase().includes(q));if(!refs.length)continue;visibleCharacters++;const group=div('storyboardPickerGroup');group.innerHTML='<h3>'+esc(sheet.name||'Character')+'</h3><p>Select only the views this scene needs.</p><div class="storyboardPickerGrid">'+refs.map(m=>'<button class="storyboardPickerItem '+(picker.selected.has(m.id)?'on':'')+'" data-storyboard-pick="'+esc(m.id)+'"><img src="'+esc(mediaUrl(m))+'" alt=""><span>'+esc((m.name||sheet.name||'Character').replace((sheet.name||'Character')+' · ','').replace((sheet.name||'Character')+' - ',''))+'</span>'+(picker.selected.has(m.id)?'<b>✓</b>':'')+'</button>').join('')+'</div>';content.appendChild(group);}
     if(!visibleCharacters){const empty=div('storyboardPickerEmpty');empty.innerHTML='<span aria-hidden="true">◎</span><h3>No saved Cast members</h3><p>Save a character to Cast first, then return here to select its reference screenshots.</p><button class="btn ghost" data-close-cast-picker>Back to storyboard</button>';content.appendChild(empty);$('[data-close-cast-picker]',empty).addEventListener('click',closeStoryboardReferencePicker);}
   }else{
     const folder=picker.folder||'';
@@ -2153,9 +2197,19 @@ function renderStoryboardReferencePicker(){
   }
   $$('[data-storyboard-pick]',content).forEach(button=>button.addEventListener('click',()=>toggleStoryboardPickerItem(button.dataset.storyboardPick)));const used=storyboardPickerFixedCount()+picker.selected.size;$('#storyboardPickerBudget').textContent=picker.mode==='references'?'':used+' / 9 references';
 }
-function applyStoryboardReferencePicker(){
+async function applyStoryboardReferencePicker(){
   const picker=storyboardPickerState;if(!picker)return;const {card,index,mode,selected}=picker;
-  if(mode==='cast'){const mapping={};for(const character of state.characters){const ids=prioritizedCharacterRefs(character).filter(id=>selected.has(id));if(ids.length)mapping[character.id]=ids;}card.character_reference_ids=mapping;card.character_ids=Object.keys(mapping);}else if(mode==='skill')card.prompt_skill_id=Array.from(selected)[0]||null;else card.reference_media_ids=Array.from(selected);
+  if(mode==='cast'){
+    const apply=$('#storyboardPickerApply');apply.disabled=true;apply.textContent='Saving…';
+    try{
+      for(const sheet of [...(state.sheets||[])]){
+        const images=readySheetRefs(sheet).filter(id=>selected.has(id));if(!images.length)continue;
+        const character=await api('/api/sheets/'+sheet.id+'/save',{method:'POST',body:{name:sheet.name,description:sheet.identity,images}});
+        state.sheets=state.sheets.filter(item=>item.id!==sheet.id);state.characters=[...state.characters.filter(item=>item.id!==character.id),character];delete sheetSel[sheet.id];
+      }
+      const mapping={};for(const character of state.characters){const ids=prioritizedCharacterRefs(character).filter(id=>selected.has(id));if(ids.length)mapping[character.id]=ids;}card.character_reference_ids=mapping;card.character_ids=Object.keys(mapping);
+    }catch(error){apply.disabled=false;apply.textContent='Save cast';toast(error.message,'err');return;}
+  }else if(mode==='skill')card.prompt_skill_id=Array.from(selected)[0]||null;else card.reference_media_ids=Array.from(selected);
   if(mode!=='skill')constrainStoryboardReferences(card,index);closeStoryboardReferencePicker();if(card._magia){renderMagiaContext();return;}renderStoryboard();scheduleStoryboardSave();toast(mode==='cast'?'Scene cast updated':mode==='skill'?(card.prompt_skill_id?'Skill added to Scene '+(index+1):'Skill removed from scene'):'Scene references updated','ok');
 }
 function captureStoryboardFields(){
@@ -4072,6 +4126,7 @@ function init() {
   hubView = 'projects';
   $('#gallery').classList.add('on');
   bindEvents();
+  bindPreviewTransform();
   syncGlobalMuteButton();
   bindPromptHelp();
   bindInfoTooltips();
