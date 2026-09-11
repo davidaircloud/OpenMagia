@@ -47,6 +47,46 @@ VERSION = "openmagia-yue-worker/1"
 TERMINAL = ("ready", "error", "cancelled")
 MAX_BODY = 4 * 1024 * 1024
 
+
+def classify_audio_quality(window_rms, peak, rms, clipped_fraction):
+    """Reject obvious decoder collapse while leaving ordinary dynamics alone."""
+    values = [float(value) for value in window_rms if value is not None]
+    if not values:
+        return {"accepted": True, "reason": "quality analysis unavailable"}
+    early = sorted(values[:max(1, len(values) // 4)])
+    baseline = early[len(early) // 2]
+    loudest = max(values)
+    ratio = loudest / max(baseline, 1e-6)
+    metrics = {"peak": round(float(peak), 6), "rms": round(float(rms), 6),
+               "clipped_fraction": round(float(clipped_fraction), 6),
+               "loudest_window_rms": round(loudest, 6), "loudness_jump": round(ratio, 2)}
+    if float(rms) < 0.002:
+        return {**metrics, "accepted": False,
+                "reason": "YuE produced an almost silent candidate."}
+    if float(clipped_fraction) >= 0.001 and loudest >= 0.45 and ratio >= 4.0:
+        return {**metrics, "accepted": False,
+                "reason": ("YuE's decoded candidate became unstable and clipped after starting normally. "
+                           "Generate another variation with a different seed.")}
+    return {**metrics, "accepted": True, "reason": ""}
+
+
+def analyze_audio_quality(path):
+    """Measure the decoded file using YuE's own NumPy/soundfile environment."""
+    try:
+        import numpy as np
+        import soundfile as sf
+        audio, sample_rate = sf.read(str(path), always_2d=True)
+        if not len(audio) or not np.isfinite(audio).all():
+            return {"accepted": False, "reason": "YuE produced invalid audio samples."}
+        size = max(1, int(sample_rate) * 2)
+        windows = [float(np.sqrt(np.mean(audio[index:index + size] ** 2)))
+                   for index in range(0, len(audio), size)]
+        return classify_audio_quality(windows, np.max(np.abs(audio)),
+                                      np.sqrt(np.mean(audio ** 2)),
+                                      np.mean(np.abs(audio) >= 0.999))
+    except Exception as exc:
+        return {"accepted": True, "reason": "quality analysis unavailable", "detail": str(exc)[:160]}
+
 try:
     from yue_prompts import parse_yue_progress   # one progress parser, one truth
 except ImportError as exc:                      # noqa: BLE001
@@ -258,6 +298,13 @@ class Worker:
                 song.result["sample_rate"] = data.get("sample_rate")
                 song.result["identity"] = data.get("identity")
                 song.result["plan"] = data
+            quality = analyze_audio_quality(audio)
+            song.result["quality"] = quality
+            if not quality.get("accepted", True):
+                song.status = "error"
+                song.error = str(quality.get("reason") or "YuE produced an unusable audio candidate.")
+                self.note(f"rejected {song.id}: {song.error}")
+                return
             song.result.setdefault("seconds", None)
             song.result.setdefault("truncated", False)
             song.status = "ready"

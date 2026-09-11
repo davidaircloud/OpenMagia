@@ -4215,7 +4215,8 @@ def run_music_job(scene_id, project):
             scene["mediaId"] = m["id"]
             scene["media"] = media_url(m)
             scene["music"] = {"job": worker_id, "phase": "done", "seconds": seconds,
-                              "truncated": result.get("truncated"), "score": bool(result.get("abc"))}
+                              "truncated": result.get("truncated"), "score": bool(result.get("abc")),
+                              "quality": dict(result.get("quality") or {})}
             if result.get("abc"):
                 score = pdir / f"gen-{scene_id}.abc"
                 score.write_text(str(result["abc"])[:yue_prompts.MAX_ABC_CHARS])

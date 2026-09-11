@@ -10,6 +10,7 @@ from unittest import mock
 
 import server
 import yue_prompts as yue
+import yue_worker
 
 LYRICS = ("# Kettle Season\n"
           "BPM: 88\n"
@@ -104,6 +105,16 @@ class RequestCompiler(unittest.TestCase):
         done = yue.parse_yue_progress("[YuE2] Completed: 36.0s audio in 49.7s")
         self.assertEqual(done["audio_seconds"], 36.0)
         self.assertIsNone(yue.parse_yue_progress("nothing to see here"))
+
+    def test_audio_quality_rejects_silence_and_late_clipping_collapse(self):
+        silent = yue_worker.classify_audio_quality([0.0005, 0.0004], 0.01, 0.00045, 0)
+        self.assertFalse(silent["accepted"])
+        collapsed = yue_worker.classify_audio_quality(
+            [0.07, 0.08, 0.16, 0.18, 0.25, 0.61, 0.53], 1.0, 0.32, 0.003)
+        self.assertFalse(collapsed["accepted"])
+        healthy = yue_worker.classify_audio_quality(
+            [0.08, 0.1, 0.16, 0.22, 0.3], 0.97, 0.18, 0.0001)
+        self.assertTrue(healthy["accepted"])
 
 
 class ParamsAndScene(unittest.TestCase):
