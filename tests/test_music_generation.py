@@ -248,6 +248,20 @@ class Skills(unittest.TestCase):
         prompt = formatter.call_args.args[0][formatter.call_args.args[0].index("-p") + 1]
         self.assertIn("Rewrite and improve", prompt)
 
+    def test_music_title_is_generated_by_the_refinement_model(self):
+        titled = SimpleNamespace(returncode=0, stderr="", stdout='{"title":"Neon Afterglow"}')
+        with mock.patch.object(server, "formatter_available", return_value=True), \
+             mock.patch.object(server, "run_formatter_command", return_value=titled) as formatter:
+            result = server.generate_music_title("cinematic electronic demo music", "")
+        self.assertEqual(result, {"title": "Neon Afterglow", "used_ai": True})
+        prompt = formatter.call_args.args[0][formatter.call_args.args[0].index("-p") + 1]
+        self.assertIn("two to six words", prompt)
+
+    def test_music_title_does_not_fall_back_to_the_prompt(self):
+        with mock.patch.object(server, "formatter_available", return_value=False):
+            result = server.generate_music_title("This entire prompt must not become the title")
+        self.assertEqual(result, {"title": "", "used_ai": False})
+
     def test_installed_runtime_requires_both_checkpoint_caches(self):
         runtime = server.yue_local_runtime()
         self.assertIn("installed", runtime)

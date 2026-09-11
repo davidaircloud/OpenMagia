@@ -859,6 +859,33 @@ def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
         pass
     raise ValueError("The refinement model could not produce a lyric draft. Try again or adjust the song direction.")
 
+
+def generate_music_title(idea, lyrics="", skill_id=""):
+    """Create a compact library title without using the request itself as a label."""
+    idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
+    if not idea and not lyrics:
+        return {"title": "", "used_ai": False}
+    if not formatter_available():
+        return {"title": "", "used_ai": False}
+    instruction = (
+        "Name this song. Return JSON only in exactly this shape: {\"title\":\"...\"}. "
+        "Write an evocative original title of two to six words. Do not repeat the request, "
+        "describe the genre, add quotation marks, or include commentary. Use the language of "
+        "the lyrics when lyrics are present.\n"
+        f"SONG DIRECTION:\n{idea}\nLYRICS:\n{lyrics[:2000]}\n"
+        f"WORKFLOW:\n{compiled_skill_direction(skill_id)}")
+    cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "96", "--temp", "0.4",
+           "--seed", "0", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
+    try:
+        run = run_formatter_command(cmd, timeout=45)
+        data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
+        title = re.sub(r"\s+", " ", str(data.get("title") or "")).strip(" \t\r\n\"'“”‘’")
+        if run.returncode == 0 and 2 <= len(title) <= 60 and len(title.split()) <= 8:
+            return {"title": title, "used_ai": True}
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+        pass
+    return {"title": "", "used_ai": False}
+
 def discover_model_sources():
     """Inventory compatible local files and running local inference servers."""
     found, seen = [], set()
@@ -5182,6 +5209,8 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             try:
                 instrumental = bool(b.get("instrumental"))
+                if b.get("action") == "title":
+                    return self._json(generate_music_title(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
                 if b.get("action") == "lyrics":
                     return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))
                 return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))

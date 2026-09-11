@@ -2474,6 +2474,11 @@ function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal')
   return {plan_mode:plan?plan.value:'full',lyrics:$('#musicLyrics')?$('#musicLyrics').value:'',
     abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
     seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
+function resetMusicComposer(){if($('#musicPrompt'))$('#musicPrompt').value='';if($('#musicLyrics'))$('#musicLyrics').value='';
+  if($('#musicAbc'))$('#musicAbc').value='';if($('#musicPlan'))$('#musicPlan').value='full';if($('#musicVocal'))$('#musicVocal').value='lead';
+  if($('#musicSeed'))$('#musicSeed').value='4242';musicSkillId='';musicCompileFingerprint='';musicCompileRequest++;
+  if(musicCompileTimer)clearTimeout(musicCompileTimer);if($('#musicCompile'))$('#musicCompile').innerHTML='';
+  if($('#musicLyricsRefineBtn'))$('#musicLyricsRefineBtn').textContent='✦ Write with model';renderMusicSkills();syncMusicPlanAvailability();}
 function closeMusicLyricsSheet(){const sheet=$('#musicLyricsSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
 async function openMusicLyricsSheet(){const params=musicComposerParams();if(params.instrumental){toast('No lead vocal is selected, so there are no words to write. Switch Voice to "Lead vocal" to add lyrics.','warn');return;}const idea=$('#musicPrompt').value.trim(),lyrics=$('#musicLyrics').value.trim();if(!idea&&!lyrics){toast('Describe the song first','err');return;}
   const button=$('#musicLyricsRefineBtn');button.disabled=true;button.textContent=lyrics?'Refining…':'Writing…';
@@ -2518,11 +2523,11 @@ async function generateMusic(){
   const idea=$('#musicPrompt').value.trim(),lyrics=($('#musicLyrics')||{}).value||'';
   if(!idea&&!lyrics.trim()){toast('Describe the song or write lyrics first','err');return;}
   generationSubmitting=true;const button=$('#genBtn');button.disabled=true;button.setAttribute('aria-busy','true');
-  try{const name=(idea.split(/\n/)[0]||lyrics.split(/\n/).find(l=>l&&!l.startsWith('['))||'Untitled song').replace(/^#\s*/,'').slice(0,60);
+  try{const title=await api('/api/music/refine',{method:'POST',body:{action:'title',prompt:idea,lyrics,prompt_skill_id:musicSkillId}});
     await api('/api/music/preview',{method:'POST',body:{prompt:idea,params:musicComposerParams(),prompt_skill_id:musicSkillId}});
-    const scene=await api('/api/scenes',{method:'POST',body:{name,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,params:musicComposerParams()}});
+    const scene=await api('/api/scenes',{method:'POST',body:{name:title.title||undefined,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,params:musicComposerParams()}});
     await api('/api/scenes/'+scene.id+'/generate',{method:'POST',body:{}});
-    toast('Song queued · '+scene.name,'ok');await refresh(true);
+    resetMusicComposer();toast('Song queued · '+scene.name,'ok');await refresh(true);
   }catch(error){toast(error.message,'err');}
   finally{generationSubmitting=false;if(button){button.removeAttribute('aria-busy');applyGenerationType();}}
 }
