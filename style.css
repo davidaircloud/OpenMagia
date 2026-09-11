@@ -746,7 +746,7 @@ footer.maximized{left:82px}
 #generate,#cast{height:100%;min-height:0}
 #rightCol[data-tab="generate"]>#generate{display:flex;flex-direction:column;padding-bottom:0!important}
 #generate>.chead{flex:0 0 auto}
-.generateScroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding-bottom:14px}
+.generateScroll{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;padding-bottom:14px}
 .generateFooter{position:relative;z-index:4;flex:0 0 auto;margin:0 -14px;padding:12px 14px;border-top:1px solid #303036;background:#0d0d0f;box-shadow:0 -12px 30px rgba(9,9,11,.72)}
 #generate .h3Composer{border-radius:13px 13px 0 0;margin-bottom:0}
 #generate .generationOptions{margin-top:0;padding:14px;border:1px solid #3a3a40;border-top:0;border-radius:0 0 13px 13px;background:#151517}
@@ -987,3 +987,16 @@ footer.maximized{left:82px}
 .settingsCard>.modelManagerTabs{gap:14px}
 .backendCard.recommended{border-color:#303036;background:#121214}
 #musicGenerationControls .h3Composer{border-color:#3a3a40;box-shadow:0 8px 28px rgba(0,0,0,.2)}
+.modelManagerPane{padding-top:16px}
+.modelManagerPane[data-model-pane=addons] .modelInstallOptions{margin:0;border-top:0}
+.modelManagerPane[data-model-pane=addons] .loraHead{min-height:44px;margin:0;padding:11px 0;border-bottom:1px solid #27272a}
+#musicGenerationControls,#musicGenerationControls>*{min-width:0;max-width:100%;box-sizing:border-box}
+#musicGenerationControls .fld{min-width:0;box-sizing:border-box}
+#musicGenerationControls .fld>span{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#musicGenerationControls textarea{display:block;width:100%;max-width:100%;box-sizing:border-box}
+#musicGenerationControls .musicGrid{grid-template-columns:1fr}
+#musicGenerationControls .slider-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+.inlineRefine{flex:0 0 auto;padding:4px 7px;border-radius:6px;color:#b8a8c7;font-size:10px;font-weight:600}
+.inlineRefine:hover{background:#27272a;color:#fff}
+#musicLyricsSheet .modelUninstallPanel{width:min(620px,94vw)}
+#musicLyricsDraft{width:100%;min-height:55vh;box-sizing:border-box;padding:14px;resize:vertical;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}

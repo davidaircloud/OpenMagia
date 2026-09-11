@@ -12,6 +12,10 @@ class ModelManagementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(server, "MODEL_REGISTRY_FILE", Path(td) / "registry.json"), \
              mock.patch.object(server, "H3_MODEL", str(Path(td) / "missing-model")), \
+             mock.patch.object(server, "yue_local_runtime", return_value={
+                 "installed": False, "present": False, "ready": False,
+                 "device": "", "reason": "not installed",
+                 "missing": ["runtime"], "weights": {}}), \
              mock.patch.object(server, "hardware_profile", return_value={
                  "os":"darwin", "architecture":"arm64", "platform":"darwin-arm64",
                  "memory_gb":64, "gpu":"", "vram_gb":0, "gpu_driver":"", "disk_free_gb":300}):
@@ -89,6 +93,27 @@ class ModelManagementTests(unittest.TestCase):
                  mock.patch.object(server, "H3_MODEL", str(active)):
                 server.uninstall_managed_model("install-old")
             self.assertFalse(target.exists())
+
+    def test_yue_uninstall_removes_runtime_and_only_its_two_model_caches(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); runtime = root / "addons" / "yue"; runtime.mkdir(parents=True)
+            hub = root / "hf" / "hub"
+            weights = [hub / "models--m-a-p--YuE2-3B", hub / "models--m-a-p--YuE2-Vae"]
+            for path in weights: path.mkdir(parents=True)
+            unrelated = hub / "models--someone--keep-me"; unrelated.mkdir(parents=True)
+            registry = root / "registry.json"
+            receipt = [str(runtime), *(str(path) for path in weights), str(unrelated)]
+            registry.write_text(json.dumps({"installations":[{"id":"install-yue", "backend_id":"yue2",
+                "path":str(runtime), "managed":True, "receipt":receipt}], "loras":[]}))
+            with mock.patch.object(server, "MODEL_REGISTRY_FILE", registry), \
+                 mock.patch.object(server, "YUE_LOCAL_DIR", runtime), \
+                 mock.patch.dict(server.os.environ, {"HF_HOME":str(root / "hf")}), \
+                 mock.patch.object(server, "stop_local_worker"):
+                result = server.uninstall_managed_model("install-yue")
+            self.assertTrue(result["active_removed"])
+            self.assertFalse(runtime.exists())
+            self.assertTrue(all(not path.exists() for path in weights))
+            self.assertTrue(unrelated.exists())
 
 
 if __name__ == "__main__":

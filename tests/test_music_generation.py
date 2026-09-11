@@ -5,6 +5,8 @@ control YuE 2 ignores, or rewriting the artist's words on the way to the model.
 """
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import server
 import yue_prompts as yue
@@ -158,6 +160,10 @@ class Registry(unittest.TestCase):
         self.assertIn("music", state)
         self.assertIn(state["music"]["selection"]["mode"], ("local", "endpoint", "none"))
         self.assertTrue(any(item.get("media") == "music" for item in state["catalog"]))
+        if server.yue_local_runtime()["installed"]:
+            installation = next(item for item in state["installations"] if item.get("backend_id") == "yue2")
+            self.assertTrue(installation["managed"])
+            self.assertIn(str(server.YUE_LOCAL_DIR.resolve()), installation["receipt"])
 
     def test_unsupported_controls_are_listed_rather_than_built(self):
         listed = " ".join(server.yue_music_state()["unsupported"]).lower()
@@ -205,6 +211,24 @@ class Skills(unittest.TestCase):
         self.assertFalse(result["used_ai"])
         self.assertEqual(result["lyrics"], "[Verse]\nKeep these words")
         self.assertIn("warm piano pop", result["style"])
+
+    def test_lyric_editor_drafts_and_revises_for_review(self):
+        drafted = SimpleNamespace(returncode=0, stderr="", stdout='{"lyrics":"[Verse]\\nRoad home\\n[Chorus]\\nCarry me"}')
+        with mock.patch.object(server, "formatter_available", return_value=True), \
+             mock.patch.object(server, "run_formatter_command", return_value=drafted) as formatter:
+            result = server.refine_music_lyrics("warm folk journey")
+        self.assertTrue(result["used_ai"])
+        self.assertIn("[Chorus]", result["lyrics"])
+        prompt = formatter.call_args.args[0][formatter.call_args.args[0].index("-p") + 1]
+        self.assertIn("Draft concise", prompt)
+
+        revised = SimpleNamespace(returncode=0, stderr="", stdout='{"lyrics":"[Verse]\\nA brighter line"}')
+        with mock.patch.object(server, "formatter_available", return_value=True), \
+             mock.patch.object(server, "run_formatter_command", return_value=revised) as formatter:
+            result = server.refine_music_lyrics("bright pop", "[Verse]\nAn old line")
+        self.assertIn("A brighter line", result["lyrics"])
+        prompt = formatter.call_args.args[0][formatter.call_args.args[0].index("-p") + 1]
+        self.assertIn("Rewrite and improve", prompt)
 
     def test_installed_runtime_requires_both_checkpoint_caches(self):
         runtime = server.yue_local_runtime()

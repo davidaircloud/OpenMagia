@@ -515,8 +515,19 @@ def model_management_state():
                     "name":"MiniMax H3 · OpenMagia", "path":active_path, "managed":managed,
                     "receipt":[active_path] if managed else [], "imported":True}
         installations.append(existing); _save_model_registry(registry)
+    local_music = yue_local_runtime()
+    yue_install = next((item for item in installations if item.get("backend_id") == "yue2"), None)
+    if local_music["installed"] and not yue_install:
+        hf = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        receipt = [str(YUE_LOCAL_DIR.resolve()),
+                   str((hf / "models--m-a-p--YuE2-3B").resolve()),
+                   str((hf / "models--m-a-p--YuE2-Vae").resolve())]
+        yue_install = {"id":"install-yue2-managed", "backend_id":"yue2", "name":"YuE 2",
+                       "path":str(YUE_LOCAL_DIR.resolve()), "managed":True, "receipt":receipt,
+                       "imported":True, "media":"music"}
+        installations.append(yue_install); _save_model_registry(registry)
     for item in installations:
-        item["active"] = item.get("path") == active_path
+        item["active"] = (item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or item.get("path") == active_path
         item["available"] = Path(item.get("path") or "").exists()
     hw = hardware_profile(); platform_id = hw["platform"]
     catalog = []
@@ -544,6 +555,22 @@ def uninstall_managed_model(installation_id):
     registry = _load_model_registry(); items = registry.get("installations") or []
     item = next((x for x in items if x.get("id") == installation_id), None)
     if not item: raise ValueError("Managed installation not found.")
+    if item.get("backend_id") == "yue2":
+        stop_local_worker()
+        allowed = {str(YUE_LOCAL_DIR.resolve())}
+        hf = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        allowed.update({str((hf / "models--m-a-p--YuE2-3B").resolve()),
+                        str((hf / "models--m-a-p--YuE2-Vae").resolve())})
+        receipt = {str(Path(value).resolve()) for value in item.get("receipt") or []}
+        targets = sorted(receipt & allowed, key=len, reverse=True)
+        if not item.get("managed") or str(YUE_LOCAL_DIR.resolve()) not in targets:
+            raise ValueError("OpenMagia has no safe managed YuE 2 installation receipt.")
+        for value in targets:
+            target = Path(value)
+            if target.exists(): shutil.rmtree(target)
+        registry["installations"] = [x for x in items if x.get("id") != installation_id]
+        _save_model_registry(registry); MUSIC_HEALTH_CACHE.clear()
+        return {"ok":True, "removed":targets, "active_removed":True}
     target = Path(item.get("path") or "").resolve()
     was_active = str(target) == str(Path(H3_MODEL).expanduser().resolve())
     managed_root = (ROOT / "models").resolve()
@@ -764,6 +791,36 @@ def refine_music_brief(idea, lyrics="", skill_id=""):
     except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
         pass
     return {"style": fallback_style, "lyrics": lyrics, "used_ai": False}
+
+
+def refine_music_lyrics(idea, lyrics="", skill_id=""):
+    """Draft or revise lyrics separately so the artist can review them before use."""
+    idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
+    if not idea and not lyrics:
+        raise ValueError("Describe the song or provide lyrics first.")
+    if not formatter_available():
+        raise ValueError("The refinement model is not available. Open Models to install or connect it.")
+    direction = compiled_skill_direction(skill_id)
+    task = ("Rewrite and improve the supplied lyrics. Preserve their language, core meaning, and strongest images, "
+            "but you may change words, rhyme, meter, repetition, and section order."
+            if lyrics else
+            "Draft concise, singable lyrics from the song direction.")
+    instruction = (
+        "Act as a lyric editor. " + task + " Use bracketed section tags such as [Verse], [Chorus], and [Bridge]. "
+        "Do not include commentary, production notes, markdown fences, or a title. "
+        "Return only valid JSON in exactly this shape: {\"lyrics\":\"[Verse]\\n...\"}.\n"
+        f"MUSIC DIRECTION:\n{idea}\nSKILL DIRECTION:\n{direction}\nCURRENT LYRICS:\n{lyrics}")
+    cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "1200", "--temp", "0.3",
+           "--seed", "0", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
+    try:
+        run = run_formatter_command(cmd, timeout=90)
+        data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
+        draft = str(data.get("lyrics") or "").strip()
+        if run.returncode == 0 and draft:
+            return {"lyrics": draft[:yue_prompts.MAX_LYRICS_CHARS], "used_ai": True}
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+        pass
+    raise ValueError("The refinement model could not produce a lyric draft. Try again or adjust the song direction.")
 
 def discover_model_sources():
     """Inventory compatible local files and running local inference servers."""
@@ -5008,6 +5065,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/music/refine":
             b = self._body()
             try:
+                if b.get("action") == "lyrics":
+                    return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
                 return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
