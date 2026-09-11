@@ -2489,20 +2489,13 @@ function musicNoticeMarkup(){const runtime=musicRuntime();
 async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||($('#genType')||{}).value!=='music')return;
   const prompt=($('#musicPrompt')||{}).value||'',params=musicComposerParams();
   const fingerprint=JSON.stringify({prompt,params,skill:musicSkillId});
-  if(fingerprint===musicCompileFingerprint&&box.childElementCount)return;
-  if(!prompt.trim()&&!String(params.lyrics).trim()){musicCompileFingerprint=fingerprint;box.innerHTML='<small>Describe the song or write lyrics to see exactly what YuE 2 will receive.</small>';return;}
-  const run=async()=>{const request=++musicCompileRequest;box.innerHTML='<small>Compiling the request…</small>';
-    try{const out=await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId}});
+  if(fingerprint===musicCompileFingerprint)return;
+  if(!prompt.trim()&&!String(params.lyrics).trim()){musicCompileFingerprint=fingerprint;box.innerHTML='';return;}
+  const run=async()=>{const request=++musicCompileRequest;musicCompileFingerprint=fingerprint;
+    try{await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId}});
       if(request!==musicCompileRequest)return;
-      const warnings=(out.warnings||[]).map(w=>'<li class="'+esc(w.level||'info')+'">'+esc(w.text||'')+'</li>').join('');
-      const moved=(out.lyric_lines_removed||[]).filter(line=>line.moved_to).map(line=>'<li><b>'+esc(line.line)+'</b> → '+esc(line.moved_to)+'</li>').join('');
-      const band=Array.isArray(out.estimated_band)?out.estimated_band:[];
-      box.innerHTML='<div class="musicCompileHead"><b>'+esc(out.summary||(out.request&&out.request.cot==='off'?'Straight to audio':'Full plan'))+'</b>'+
-        (band.length?'<span>YuE 2 sets the length · expect roughly '+esc(String(band[0]))+'–'+esc(String(band[1]))+' s</span>':'')+'</div>'+
-        (out.sections&&out.sections.length?'<div class="musicSections">'+out.sections.map(s=>'<span>'+esc(s)+'</span>').join('')+'</div>':'')+
-        (warnings||moved?'<ul class="musicWarnings">'+warnings+moved+'</ul>':'<ul class="musicWarnings ok"><li>Nothing was changed: lyric reaches the model as written.</li></ul>')+
-        '<small>'+esc(String(out.sung_lines||0))+' sung lines · '+esc(String(out.style_chars||0))+' style characters'+(out.request&&out.request.abc?' · score-conditioned':'')+'</small>';musicCompileFingerprint=fingerprint;}
-    catch(error){if(request===musicCompileRequest){box.innerHTML='<ul class="musicWarnings error"><li>'+esc(error.message)+'</li></ul>';musicCompileFingerprint=fingerprint;}}};
+      box.innerHTML='';musicCompileFingerprint=fingerprint;}
+    catch(error){if(request===musicCompileRequest){box.innerHTML='<div class="musicValidationError">'+esc(error.message)+'</div>';musicCompileFingerprint=fingerprint;}}};
   if(musicCompileTimer)clearTimeout(musicCompileTimer);
   if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
 function bindMusicComposer(){if(musicBound)return;musicBound=true;

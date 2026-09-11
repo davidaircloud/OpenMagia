@@ -950,6 +950,7 @@ footer.maximized{left:82px}
 .musicCompile{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0;min-height:34px;padding:10px 12px 12px;border-top:1px solid #232327;color:#a1a1aa;font-size:11px}
 .musicCompile>*{grid-column:1;min-width:0;max-width:100%;box-sizing:border-box}
 .musicCompile:empty{display:none}
+.musicValidationError{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid rgba(248,113,113,.28);border-radius:7px;background:rgba(127,29,29,.12);color:#fca5a5;line-height:1.45;overflow-wrap:anywhere}
 .musicCompile>small{color:#71717a;font-size:10px}
 .musicCompileHead{display:flex;flex-wrap:wrap;align-items:baseline;gap:9px}
 .musicCompileHead b{color:#e4e4e7;font-size:12px}

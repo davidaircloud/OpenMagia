@@ -194,6 +194,8 @@ class Registry(unittest.TestCase):
         self.assertIn("m.kind==='audio'", script)
         self.assertIn("musicCompileFingerprint", script)
         self.assertIn("generateScrollTop", script)
+        self.assertNotIn('class="musicCompileHead"', script)
+        self.assertIn('class="musicValidationError"', script)
 
 
 class Skills(unittest.TestCase):
