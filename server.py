@@ -770,7 +770,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
     instrumental = bool(instrumental) or (not lyrics and bool(re.search(
         r"\b(?:instrumental|no (?:lead )?vocals?|without vocals?|no singing)\b", idea, re.I)))
-    plan_mode = "off" if instrumental else "full"
+    plan_mode = "full"
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
     if instrumental:
@@ -810,9 +810,9 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
             if run.returncode == 0 and style and len(style.strip()) >= 40:
                 return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
                         "lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "instrumental": True,
-                        "plan_mode": "off", "used_ai": True}
+                        "plan_mode": "full", "used_ai": True}
             return {"style": fallback_style, "lyrics": yue_prompts.INSTRUMENTAL_LYRICS,
-                    "instrumental": True, "plan_mode": "off", "used_ai": False}
+                    "instrumental": True, "plan_mode": "full", "used_ai": False}
         original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         if run.returncode == 0 and style and refined_lyrics and (not lyrics or original_lines == refined_lines):

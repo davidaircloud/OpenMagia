@@ -56,15 +56,10 @@ SECTION_WORDS = {
     "verse 1", "verse 2", "chorus 1", "chorus 2",
 }
 INSTRUMENTAL_SECTIONS = {"instrumental", "inst", "solo", "interlude", "breakdown"}
-# Measured on MPS with no sung words and no score: one bare tag ended by itself at
-# 901 tokens (36 s of audio); an arc of [Intro]/[Instrumental]x2/[Outro] streamed
-# past 6,000 tokens without ending. Sections are not a length control - fewer of
-# them are closer to one - so OpenMagia asks for the smallest thing that can end,
-# and the worker keeps a token ceiling as the real guard.
+# YuE has no instrumental switch. Keep the lyric shape minimal and let the chosen
+# symbolic plan provide a bounded composition; direct generation has been observed
+# to stream past 6,000 tokens without emitting an end token for ordinary prompts.
 INSTRUMENTAL_LYRICS = "[Instrumental]"
-# Without sung words or ABC, melody planning has no pitch boundary and the semantic
-# stage does not stop by itself; direct generation is the shape that terminates.
-UNBOUNDED_PLAN_MODE = "off"
 SEMANTIC_TOKENS_PER_SECOND = 23.0        # measured: 1011 semantic tokens -> 43.5 s of audio
 INSTRUMENTAL_STYLE_TAG = "instrumental arrangement, no lead vocal, no sung words"
 
@@ -264,6 +259,8 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         raise ValueError(f"Unknown music plan mode '{plan_mode}'. Use full, melody, or off.")
     answers = dict(answers or {})
     requested_plan = mode
+    if instrumental and mode == "off" and not normalize_abc(abc):
+        raise ValueError("Instrumental generation needs Full plan so YuE can reach a musical ending.")
     lyric_report = []
     clean_lyrics = normalize_lyrics(lyrics, lyric_report)
     idea_text = clean_text(idea)
@@ -288,10 +285,6 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         # an endless cue costs, and yue_worker.py --max-tokens for the guard.
         clean_lyrics = INSTRUMENTAL_LYRICS
     requested_plan = mode
-    if instrumental and not normalize_abc(abc) and mode != UNBOUNDED_PLAN_MODE:
-        # Measured on MPS: no sung words, no score, melody planning -> an endless
-        # score that ran until the OS killed the process. Do not queue that shape.
-        mode = UNBOUNDED_PLAN_MODE
     style = compile_style_tags(style=idea_text, answers=answers, skill_direction=skill_direction,
                                instrumental=instrumental)
     score = normalize_abc(abc)
@@ -312,18 +305,11 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         request["cfg_scale"] = float(guidance)
     validate_music_request(request)
     warnings = []
-    if mode != requested_plan:
-        warnings.append({"kind": "planning",
-                         "level": "error",
-                         "text": ("Score-first planning needs an ABC score, so this cue is planned "
-                                  "directly instead; an instrumental with no score has no boundary "
-                                  "to end on.")})
     if instrumental:
         warnings.append({"kind": "duration", "level": "info",
-                         "text": ("YuE 2 has no duration argument. With no sung words and no score, "
-                                  "the cue ends when the model decides to; if you stop it early there "
-                                  "is no partial audio to keep. For a cue that must fit a length, "
-                                  "supply an ABC score.")})
+                         "text": ("YuE 2 has no duration argument. The score plan gives this "
+                                  "instrumental a musical boundary, but YuE 2 still decides the "
+                                  "rendered length. Stopping early leaves no partial audio.")})
     signature = hashlib.sha256(
         json.dumps({"request": request, "skill": skill_id or ""}, sort_keys=True,
                    ensure_ascii=False).encode("utf-8")).hexdigest()[:12]

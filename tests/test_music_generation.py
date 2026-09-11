@@ -62,13 +62,14 @@ class RequestCompiler(unittest.TestCase):
         kinds = {warning["kind"] for warning in compiled["audit"]["warnings"]}
         self.assertIn("duration", kinds)
 
-    def test_instrumental_without_a_score_never_plans_by_melody(self):
-        # Measured: no sung words, no ABC, and melody planning produced an endless
-        # score that ran until the OS killed the process.
+    def test_instrumental_preserves_the_selected_symbolic_plan(self):
         compiled = yue.format_music_request(idea="solo cello", instrumental=True, plan_mode="melody")
-        self.assertEqual(compiled["request"]["cot"], "off")
+        self.assertEqual(compiled["request"]["cot"], "melody")
         self.assertEqual(compiled["audit"]["plan_mode_requested"], "melody")
-        self.assertIn("planning", {warning["kind"] for warning in compiled["audit"]["warnings"]})
+
+    def test_direct_instrumental_is_rejected_before_a_scene_is_created(self):
+        with self.assertRaisesRegex(ValueError, "needs Full plan"):
+            yue.format_music_request(idea="ambient synth", instrumental=True, plan_mode="off")
 
     def test_sung_words_beat_an_instrumental_switch(self):
         compiled = yue.format_music_request(idea="anthem", lyrics="[Verse]\nwords remain", instrumental=True)
@@ -196,6 +197,8 @@ class Registry(unittest.TestCase):
         self.assertIn("generateScrollTop", script)
         self.assertNotIn('class="musicCompileHead"', script)
         self.assertIn('class="musicValidationError"', script)
+        self.assertLess(script.index("'/api/music/preview'", script.index('async function generateMusic')),
+                        script.index("'/api/scenes'", script.index('async function generateMusic')))
 
 
 class Skills(unittest.TestCase):
@@ -224,7 +227,7 @@ class Skills(unittest.TestCase):
         with mock.patch.object(server, "formatter_available", return_value=False):
             result = server.refine_music_brief("Lo-fi piano, instrumental, no lead vocal")
         self.assertTrue(result["instrumental"])
-        self.assertEqual("off", result["plan_mode"])
+        self.assertEqual("full", result["plan_mode"])
         self.assertEqual("[Instrumental]", result["lyrics"])
 
     def test_lyric_editor_drafts_and_revises_for_review(self):

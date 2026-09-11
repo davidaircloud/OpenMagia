@@ -2467,6 +2467,9 @@ function applyGenerationType() {
 let musicSkillId='',musicCompileTimer=null,musicCompileFingerprint='',musicCompileRequest=0,musicBound=false;
 function musicRuntime(){return (engine&&engine.music)||null;}
 function musicReady(){const runtime=musicRuntime();return !!(runtime&&runtime.ready);}
+function syncMusicPlanAvailability(){const plan=$('#musicPlan'),vocal=$('#musicVocal');if(!plan||!vocal)return;
+  const direct=plan.querySelector('option[value="off"]'),instrumental=vocal.value==='instrumental';
+  if(direct)direct.disabled=instrumental;if(instrumental&&plan.value==='off')plan.value='full';}
 function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal');
   return {plan_mode:plan?plan.value:'full',lyrics:$('#musicLyrics')?$('#musicLyrics').value:'',
     abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
@@ -2498,12 +2501,12 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
     catch(error){if(request===musicCompileRequest){box.innerHTML='<div class="musicValidationError">'+esc(error.message)+'</div>';musicCompileFingerprint=fingerprint;}}};
   if(musicCompileTimer)clearTimeout(musicCompileTimer);
   if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
-function bindMusicComposer(){if(musicBound)return;musicBound=true;
-  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';compileMusicPreview(false);});});
+function bindMusicComposer(){syncMusicPlanAvailability();if(musicBound)return;musicBound=true;
+  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal')syncMusicPlanAvailability();compileMusicPreview(false);});});
   const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
   const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
   // reply like "Instrumental" must never overwrite the artist's full description.
-  if(refined && refined.length >= Math.min(originalLen||refined.length,80))$('#musicPrompt').value=refined;if(out.instrumental!=null)$('#musicVocal').value=out.instrumental?'instrumental':'lead';if(['full','melody','off'].includes(out.plan_mode))$('#musicPlan').value=out.plan_mode;toast(out.used_ai?(out.instrumental?'Instrumental direction refined':'Music direction refined'):'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
+  if(refined && refined.length >= Math.min(originalLen||refined.length,80))$('#musicPrompt').value=refined;if(out.instrumental!=null)$('#musicVocal').value=out.instrumental?'instrumental':'lead';if(['full','melody','off'].includes(out.plan_mode))$('#musicPlan').value=out.plan_mode;syncMusicPlanAvailability();toast(out.used_ai?(out.instrumental?'Instrumental direction refined':'Music direction refined'):'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
   const skills=$('#musicSkillBtn');if(skills)skills.addEventListener('click',()=>openComposerPicker('music-skills'));
   $('#musicLyricsRefineBtn').addEventListener('click',event=>{event.preventDefault();openMusicLyricsSheet();});
   $('#musicLyricsScrim').addEventListener('click',closeMusicLyricsSheet);$('#musicLyricsClose').addEventListener('click',closeMusicLyricsSheet);$('#musicLyricsCancel').addEventListener('click',closeMusicLyricsSheet);
@@ -2516,6 +2519,7 @@ async function generateMusic(){
   if(!idea&&!lyrics.trim()){toast('Describe the song or write lyrics first','err');return;}
   generationSubmitting=true;const button=$('#genBtn');button.disabled=true;button.setAttribute('aria-busy','true');
   try{const name=(idea.split(/\n/)[0]||lyrics.split(/\n/).find(l=>l&&!l.startsWith('['))||'Untitled song').replace(/^#\s*/,'').slice(0,60);
+    await api('/api/music/preview',{method:'POST',body:{prompt:idea,params:musicComposerParams(),prompt_skill_id:musicSkillId}});
     const scene=await api('/api/scenes',{method:'POST',body:{name,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,params:musicComposerParams()}});
     await api('/api/scenes/'+scene.id+'/generate',{method:'POST',body:{}});
     toast('Song queued · '+scene.name,'ok');await refresh(true);
