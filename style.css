@@ -982,3 +982,8 @@ footer.maximized{left:82px}
 .musicSkillArt{display:flex;min-height:180px;align-items:center;justify-content:center;gap:12px;background:radial-gradient(circle at 50% 42%,#3b2755,#17151d 68%)}
 .musicSkillArt span{font-size:52px;color:#d6a5ff}.musicSkillArt small{color:#b8a8c7;font-size:12px}
 .musicSkillGlyph{font-size:24px;color:#d6a5ff}
+
+/* Models and music use the same neutral library and composer hierarchy. */
+.settingsCard>.modelManagerTabs{gap:14px}
+.backendCard.recommended{border-color:#303036;background:#121214}
+#musicGenerationControls .h3Composer{border-color:#3a3a40;box-shadow:0 8px 28px rgba(0,0,0,.2)}

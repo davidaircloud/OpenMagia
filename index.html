@@ -161,7 +161,7 @@
           <div class="styleComposerBar"><button id="musicRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
         </section>
         <section class="h3Composer">
-          <div class="musicSkills" id="musicSkills" role="radiogroup" aria-label="Song skill"></div>
+          <div class="activePromptSkills" id="activeMusicSkill"></div>
           <label class="fld musicLyricsField"><span>Lyrics</span>
             <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
             <small>Section tags such as <code>[Verse]</code> or <code>[Chorus]</code> are kept; the model is trained on them. Lyrics are sent exactly as written — only Markdown headings and production notes are taken out, and the review sheet lists what was.</small>
@@ -179,7 +179,7 @@
             <small>Also where a real melody belongs: cover a tune, keep a theme from your project, or fix the mode a no-words piece would otherwise wander in.</small>
           </label>
           <div id="musicCompile" class="musicCompile" aria-live="polite"></div>
-          <div class="composerBar"><button id="musicManageBtn" class="composerTool">▣ YuE 2 runtime</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>
+          <div class="composerBar"><button id="musicManageBtn" class="composerTool">▣ Models · YuE 2</button><button id="musicSkillBtn" class="composerTool">✣ Skills</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>
         </section>
       </div>
       <div class="generateFooter"><button id="genBtn" class="generatePrimary" type="button"><span>Generate scene</span><span aria-hidden="true">→</span></button></div>

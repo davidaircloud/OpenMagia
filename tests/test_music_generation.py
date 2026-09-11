@@ -173,6 +173,16 @@ class Registry(unittest.TestCase):
         generate_end = html.index("<!-- cast -->")
         self.assertGreaterEqual(html[html.index('id="generate"'):generate_end].count("</div>"), 4)
 
+    def test_music_reuses_model_and_skill_components(self):
+        root = Path(server.__file__).parent
+        html = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="activeMusicSkill"', html)
+        self.assertIn('id="musicSkillBtn"', html)
+        self.assertNotIn('class="musicSkills"', html)
+        self.assertNotIn('const musicCard=', script)
+        self.assertIn("musicSkillMode", script)
+
 
 class Skills(unittest.TestCase):
     def test_music_skills_exist_with_contracts(self):
