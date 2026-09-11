@@ -68,6 +68,7 @@ let timelineMagiaSeed = 0;
 let timelineMagiaPlanning = false;
 let timelineMagiaInterpreting = false;
 let timelineMagiaTimer = 0;
+let timelineMagiaRecipe = 'subtle';
 let appliedLayoutSlug = null;
 let layoutSaveTimer = 0;
 let refreshPromise = null;
@@ -163,7 +164,7 @@ async function refresh(force = false) {
     // Release decoders for media that left the timeline. Safari has a much
     // lower practical decoder ceiling than Chromium, so retaining old hidden
     // elements eventually makes a healthy page appear blank or unresponsive.
-    for(const id of Object.keys(videoEls))if(!timelineMediaIds.has(id)){videoEls[id].pause&&videoEls[id].pause();videoEls[id].remove();delete videoEls[id];}
+    for(const id of Object.keys(videoEls))if(!timelineMediaIds.has(videoEls[id].dataset.mediaId||id)){videoEls[id].pause&&videoEls[id].pause();videoEls[id].remove();delete videoEls[id];}
     for(const id of Object.keys(audioEls))if(!timelineMediaIds.has(id)){audioEls[id].pause();if(audioGains[id]){try{audioGains[id].disconnect();}catch(_){}}audioEls[id].remove();delete audioEls[id];delete audioGains[id];}
     for (const id of timelineMediaIds) {
       const m = state.media.find(item => item.id === id);
@@ -266,15 +267,18 @@ function mediaPathUrl(src) {
 }
 
 /* ---------------- media elements ---------------- */
-function getVideoEl(media) {
-  let el = videoEls[media.id];
+function getVideoEl(media,clipId) {
+  const first=((state&&state.tracks)||[]).flatMap(track=>track.clips||[]).find(clip=>clip.mediaId===media.id);
+  const key=media.kind==='image'||!clipId||!first||first.id===clipId?media.id:media.id+':'+clipId;
+  let el = videoEls[key];
   if (!el) {
     el = media.kind === 'image' ? document.createElement('img') : document.createElement('video');
     if (media.kind !== 'image') { el.muted = true; el.playsInline = true; el.preload = 'auto'; }
     el.src = mediaUrl(media);
     if (media.kind === 'image') { el.addEventListener('load', () => { if (!playing) drawNow(); }); }
     pool.appendChild(el);
-    videoEls[media.id] = el;
+    el.dataset.mediaId=media.id;
+    videoEls[key] = el;
   }
   return el;
 }
@@ -447,7 +451,7 @@ function transitionItems(c){
   return [];
 }
 function transitionPayload(items){return {items:items.map(x=>({...x,dur:+x.dur||0,enabled:x.enabled!==false}))};}
-function enabledTransitions(c,edge){return transitionItems(c).filter(x=>x.enabled!==false&&(x.edge||'start')===edge&&+x.dur>0);}
+function enabledTransitions(c,edge){return transitionItems(c).filter(x=>x.enabled!==false&&(x.edge||'start')===edge&&+x.dur>0).slice(-1);}
 function clipHasAnimation(c){return transformPoints(c).length>0||transitionItems(c).length>0;}
 function drawContain(ctx, el, zoom, canvas) {
   const W = canvas.width, H = canvas.height;
@@ -485,7 +489,7 @@ function previewTransformGeometry(c) {
   if(!cv||!stage||!m)return null;
   const cvRect=cv.getBoundingClientRect(),stageRect=stage.getBoundingClientRect();
   if(!cvRect.width||!cvRect.height)return null;
-  const el=getVideoEl(m),vw=el.videoWidth||el.naturalWidth||m.w||state.canvas.width,vh=el.videoHeight||el.naturalHeight||m.h||state.canvas.height;
+  const el=getVideoEl(m,c.id),vw=el.videoWidth||el.naturalWidth||m.w||state.canvas.width,vh=el.videoHeight||el.naturalHeight||m.h||state.canvas.height;
   const local=clamp(playTime-c.start,0,Math.max(.05,c.out-c.in)),motion=clipMotion(c,local);
   const scale=Math.max(state.canvas.width/vw,state.canvas.height/vh)*motion.zoom;
   const sw=vw*scale,sh=vh*scale,pos=c.position||{},dx=(+pos.x||0)*state.canvas.width/100,dy=(+pos.y||0)*state.canvas.height/100;
@@ -516,55 +520,69 @@ function bindPreviewTransform(){
   window.addEventListener('resize',renderPreviewTransform);
 }
 
-function drawBaseTrack(ctx, base, t) {
-  const clips = base.clips.slice().sort((a, b) => a.start - b.start);
-  let cur = null, prev = null;
-  for (let i = 0; i < clips.length; i++) {
-    const c = clips[i];
-    if (t >= c.start - 1e-6 && t < c.start + (c.out - c.in)) { cur = c; prev = clips[i - 1] || null; break; }
-  }
-  if (!cur) return;
-  const media = mediaById(cur.mediaId); if (!media) return;
-  const el = getVideoEl(media);
-  const localT = t - cur.start;
-  const srcPos = cur.in + localT;
-  const curM = clipMotion(cur, localT); // motion-aware zoom + center (still images)
-  const startTransitions=enabledTransitions(cur,'start'),endTransitions=enabledTransitions(cur,'end');
-  const td=startTransitions.length?Math.max(...startTransitions.map(x=>+x.dur||0)):0;
-  const endDur=endTransitions.length?Math.max(...endTransitions.map(x=>+x.dur||0)):0;
-  // crossfade with the previous (adjacent) base clip during the incoming window
-  if (td > 0 && prev) {
-    const pd = prev.out - prev.in;
-    if (prev.start + pd >= cur.start - 0.05 && localT < td) {
-      const xalpha = localT / td;
-      const pm = mediaById(prev.mediaId);
-      if (pm) {
-        const pel = getVideoEl(pm);
-        seek(pel, prev.in + pd - (td - localT)); // outgoing tail
-        const prevM = clipMotion(prev, pd);
-        ctx.globalAlpha = 1 - xalpha; drawClipCover(ctx,prev,pel,prevM);
-      }
-      seek(el, srcPos);
-      ctx.globalAlpha = xalpha; drawClipCover(ctx,cur,el,curM);
-      ctx.globalAlpha = 1;
-      return;
+// Render the selected transition, preserving an opaque outgoing image during a
+// dissolve. Multiplying both layer opacities would create a dark dip halfway.
+function drawTransition(ctx,outgoing,incoming,type,progress){
+  const p=clamp(progress,0,1),W=state.canvas.width,H=state.canvas.height;
+  ctx.save();
+  if(type==='slide'){
+    if(outgoing){ctx.save();ctx.translate(-p*W,0);outgoing();ctx.restore();}
+    ctx.translate((1-p)*W,0);incoming();
+  }else if(type==='fade'&&outgoing){
+    // Dip through black; a dissolve is the separate continuous crossfade.
+    ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+    if(p<.5){ctx.globalAlpha*=1-2*p;outgoing();}else{ctx.globalAlpha*=2*p-1;incoming();}
+  }else{
+    if(outgoing)outgoing();
+    if(type==='wipe'){
+      ctx.beginPath();ctx.rect((1-p)*W,0,p*W,H);ctx.clip();incoming();
+    }else if(type==='circle'){
+      ctx.beginPath();ctx.arc(W/2,H/2,Math.hypot(W,H)*p/2,0,Math.PI*2);ctx.clip();incoming();
+    }else{
+      ctx.globalAlpha*=p;incoming();
     }
   }
-  seek(el, srcPos);
-  if(td>0&&localT<td)ctx.globalAlpha=Math.max(0,localT/td);
-  if(endDur>0&&localT>(cur.out-cur.in)-endDur)ctx.globalAlpha=Math.min(ctx.globalAlpha,Math.max(0,((cur.out-cur.in)-localT)/endDur));
-  drawClipCover(ctx,cur,el,curM);ctx.globalAlpha=1;
+  ctx.restore();
 }
-
-function drawOverlayTrack(ctx, tr, t) {
-  for (const c of tr.clips) {
-    if (t < c.start || t >= c.start + (c.out - c.in)) continue;
-    const m = mediaById(c.mediaId); if (!m) continue;
-    const el = getVideoEl(m);
-    seek(el, c.in + (t - c.start));
-    const cm = clipMotion(c, t - c.start);
-    const local=t-c.start,d=c.out-c.in,starts=enabledTransitions(c,'start'),ends=enabledTransitions(c,'end'),sd=starts.length?Math.max(...starts.map(x=>+x.dur||0)):0,ed=ends.length?Math.max(...ends.map(x=>+x.dur||0)):0;
-    if(sd&&local<sd)ctx.globalAlpha=Math.max(0,local/sd);if(ed&&local>d-ed)ctx.globalAlpha=Math.min(ctx.globalAlpha,Math.max(0,(d-local)/ed));drawClipCover(ctx,c,el,cm);ctx.globalAlpha=1;
+function drawExitTransition(ctx,draw,type,remaining){
+  const p=clamp(remaining,0,1);
+  if(type==='slide'){ctx.save();ctx.translate(-(1-p)*state.canvas.width,0);draw();ctx.restore();}
+  else drawTransition(ctx,null,draw,type,p);
+}
+function drawBaseTrack(ctx, base, t) {
+  const clips=base.clips.slice().sort((a,b)=>a.start-b.start);
+  const index=clips.findIndex(c=>t>=c.start-1e-6&&t<c.start+(c.out-c.in));
+  if(index<0)return;
+  const cur=clips[index],prev=clips[index-1],media=mediaById(cur.mediaId);if(!media)return;
+  const local=t-cur.start,duration=cur.out-cur.in,el=getVideoEl(media,cur.id);
+  seek(el,cur.in+local);
+  const rawIncoming=()=>drawClipCover(ctx,cur,el,clipMotion(cur,local));
+  const start=enabledTransitions(cur,'start')[0],end=enabledTransitions(cur,'end')[0];
+  const td=start?Math.min(duration,+start.dur):0,ed=end?Math.min(duration,+end.dur):0;
+  ctx.save();
+  const incoming=()=>{if(ed>0&&local>duration-ed)drawExitTransition(ctx,rawIncoming,end.type,(duration-local)/ed);else rawIncoming();};
+  if(td>0&&local<td){
+    let outgoing=null;
+    if(prev&&Math.abs(prev.start+(prev.out-prev.in)-cur.start)<.05){
+      const pm=mediaById(prev.mediaId);
+      if(pm){const pel=getVideoEl(pm,prev.id);const tail=Math.max(prev.in,prev.out-1/24);seek(pel,tail);outgoing=()=>{if(enabledTransitions(prev,'end').length){ctx.fillStyle='#000';ctx.fillRect(0,0,state.canvas.width,state.canvas.height);}else drawClipCover(ctx,prev,pel,clipMotion(prev,prev.out-prev.in));};}
+    }
+    drawTransition(ctx,outgoing,incoming,start.type,local/td);
+  }else incoming();
+  ctx.restore();
+}
+function drawOverlayTrack(ctx,tr,t){
+  for(const c of tr.clips){
+    const local=t-c.start,d=c.out-c.in;if(local<0||local>=d)continue;
+    const m=mediaById(c.mediaId);if(!m)continue;
+    const el=getVideoEl(m,c.id);seek(el,c.in+local);
+    const draw=()=>drawClipCover(ctx,c,el,clipMotion(c,local));
+    const start=enabledTransitions(c,'start')[0],end=enabledTransitions(c,'end')[0];
+    const sd=start?Math.min(d,+start.dur):0,ed=end?Math.min(d,+end.dur):0;
+    ctx.save();
+    const withExit=()=>{if(ed>0&&local>d-ed)drawExitTransition(ctx,draw,end.type,(d-local)/ed);else draw();};
+    if(sd>0&&local<sd)drawTransition(ctx,null,withExit,start.type,local/sd);else withExit();
+    ctx.restore();
   }
 }
 
@@ -582,13 +600,6 @@ function audioSources(t) {
       if (!m || m.kind === 'image' || !m.hasAudio) continue;
       const localT = t - c.start;
       let gain = 1;
-      if (tr === base) {
-        const incoming=enabledTransitions(c,'start');const tin=incoming.length?Math.max(...incoming.map(x=>+x.dur||0)):0;
-        const nxt = clips[i + 1];
-        const outgoing=enabledTransitions(c,'end');const nextIncoming=nxt?enabledTransitions(nxt,'start'):[];const tout=Math.max(outgoing.length?Math.max(...outgoing.map(x=>+x.dur||0)):0,nextIncoming.length?Math.max(...nextIncoming.map(x=>+x.dur||0)):0);
-        if (tin > 0) gain = Math.min(gain, localT / tin);
-        if (tout > 0) gain = Math.min(gain, (d - localT) / tout);
-      }
       const fades=c.audioFade||{},fadeIn=clamp(+fades.in||0,0,d),fadeOut=clamp(+fades.out||0,0,d);
       gain*=clamp(Number.isFinite(+c.volume)?+c.volume:1,0,2);
       if(fadeIn>0)gain=Math.min(gain,localT/fadeIn);
@@ -898,11 +909,12 @@ function renderClip(tr, c) {
 
 function onTransitionKeyframeDown(e,c,transitionId,diamond){
   const items=transitionItems(c).map(x=>({...x})),item=items.find(x=>x.id===transitionId);if(!item)return;
-  e.preventDefault();e.stopPropagation();selectedTransition={clipId:c.id,transitionId};selectedKeyframe=null;select({type:'clip',id:c.id});diamond.classList.add('selected');
+  e.preventDefault();e.stopPropagation();selectedTransition={clipId:c.id,transitionId};selectedKeyframe=null;inspectorClipTab='transitions';select({type:'clip',id:c.id});diamond.classList.add('selected');
   const rail=diamond.closest('.transitionRail'),clip=diamond.closest('.clip'),clipDur=Math.max(.05,c.out-c.in),edge=item.edge||'start';
+  playTime=c.start+(edge==='end'?clipDur-item.dur/2:item.dur/2);drawNow();
   const dragWidth=Math.max(24,(clip&&clip.getBoundingClientRect().width)||rail.getBoundingClientRect().width||clipDur*pxPerSec),pointerId=e.pointerId;
   let lastX=e.clientX,ratio=clamp((+item.dur||0)/clipDur,0,1),pendingDelta=0,raf=0;diamond.classList.add('dragging');document.body.classList.add('dragging-keyframe');
-  const paint=()=>{raf=0;ratio=clamp(ratio+(edge==='end'?-pendingDelta:pendingDelta)/dragWidth,0,1);pendingDelta=0;const dur=ratio*clipDur,at=edge==='end'?1-ratio:ratio;item.dur=dur;c.transition=transitionPayload(items);diamond.style.left=(at*100)+'%';rail.style.setProperty('--transition-start',edge==='end'?(at*100)+'%':'0%');rail.style.setProperty('--transition-size',(ratio*100)+'%');const label=rail.querySelector('.keyframeLabel');if(label)label.textContent=(edge==='end'?'End':'Start')+' · '+item.type+' · '+dur.toFixed(2)+'s'+(item.enabled===false?' · off':'');playTime=c.start+(edge==='end'?clipDur-dur:dur);drawNow();};
+  const paint=()=>{raf=0;ratio=clamp(ratio+(edge==='end'?-pendingDelta:pendingDelta)/dragWidth,0,1);pendingDelta=0;const dur=ratio*clipDur,at=edge==='end'?1-ratio:ratio;item.dur=dur;c.transition=transitionPayload(items);diamond.style.left=(at*100)+'%';rail.style.setProperty('--transition-start',edge==='end'?(at*100)+'%':'0%');rail.style.setProperty('--transition-size',(ratio*100)+'%');const label=rail.querySelector('.keyframeLabel');if(label)label.textContent=(edge==='end'?'End':'Start')+' · '+item.type+' · '+dur.toFixed(2)+'s'+(item.enabled===false?' · off':'');playTime=c.start+(edge==='end'?clipDur-dur/2:dur/2);drawNow();};
   const move=ev=>{if(ev.pointerId!==pointerId||!Number.isFinite(ev.clientX))return;const raw=ev.clientX-lastX;lastX=ev.clientX;if(Math.abs(raw)>Math.max(120,dragWidth*.75))return;pendingDelta+=clamp(raw,-48,48);if(!raf)raf=requestAnimationFrame(paint)};
   const up=()=>{if(raf){cancelAnimationFrame(raf);paint()}diamond.classList.remove('dragging');document.body.classList.remove('dragging-keyframe');window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);putClip(c,{transition:c.transition});};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
 }
@@ -1424,6 +1436,19 @@ function renderSceneInsp(body, hint, id) {
 
   // params
   const d = div('d'); d.style.cssText = 'font-size:11.5px;color:var(--muted);line-height:1.7;margin-top:4px';
+  if (sc.generation_type === 'music') {
+    // A song has no frames, steps, or resolution. Say what it does have.
+    const mt = sc.music || {}, band = Array.isArray(mt.estimated_band) ? mt.estimated_band : [];
+    d.innerHTML = 'Status: <b>' + (sc.status || 'idle') + '</b><br>Seed: ' + (sc.params && sc.params.seed) +
+      ' · Plan: ' + esc(mt.plan_mode || (sc.params && sc.params.plan_mode) || 'full') +
+      (mt.sung_lines ? ' · ' + mt.sung_lines + ' sung lines' : '') +
+      (mt.sections && mt.sections.length ? ' · ' + esc(mt.sections.join(' › ')) : '') +
+      (band.length && band[1] ? '<br>YuE 2 sets the length · expect roughly ' + band[0] + '–' + band[1] + ' s' : '') +
+      (sc.params && sc.params.instrumental ? '<br>No lead vocal (style direction, not a switch)' : '') +
+      (mt.seconds ? '<br>Rendered: ' + (+mt.seconds).toFixed(1) + ' s of audio' + (mt.score ? ' · ABC score saved to media' : '') : '') +
+      (mt.truncated ? '<br><b>Hit the token ceiling, so no audio was kept</b>' : '') +
+      (mt.phase && mt.phase !== 'done' ? '<br>Stage: ' + esc(mt.phase) : '');
+  } else
   d.innerHTML = 'Status: <b>' + (sc.status || 'idle') + '</b><br>Seed: ' + (sc.params && sc.params.seed) +
     ' · Steps: ' + (sc.params && sc.params.steps) + ((!sceneMedia || sceneMedia.kind !== 'image') ? ' · Frames: ' + (sc.params && sc.params.frames) : '') +
     (sc.chain ? '<br>Chains from previous: yes' : '');
@@ -1441,8 +1466,11 @@ function generationProgressField(sc){
   const elapsed=p.elapsed_seconds!=null?p.elapsed_seconds:(now-estimate.seenAt)/1000;
   const card=div('generationInspectorProgress');
   const status=sc.status==='queued'?'Waiting in queue':(p.phase||'Preparing generation').replace(/\b\w/g,c=>c.toUpperCase());
-  const detail=sc.status==='queued'?'Starts automatically after the active generation.':(total>1?completed+' of '+total+' steps'+(eta!=null?' · '+fmtEstimate(eta)+' remaining':' · estimating after the next step'):'Loading the model and preparing references…');
-  const badge=sc.status==='queued'?'Queued':(total>1?pct+'%':'Starting');
+  // YuE 2 reports token counts for its AR stages and nothing at all while decoding,
+  // so "0 of 0 steps" or a fake percent would both lie. Say what the runtime said.
+  const tokenStage=p.engine==='yue2'&&total<=1;
+  const detail=sc.status==='queued'?'Starts automatically after the active generation.':(total>1?completed+' of '+total+' steps'+(eta!=null?' · '+fmtEstimate(eta)+' remaining':' · estimating after the next step'):(tokenStage?(completed?completed+' tokens · this stage reports no total':'Warming the YuE 2 runtime…'):'Loading the model and preparing references…'));
+  const badge=sc.status==='queued'?'Queued':(total>1?pct+'%':(tokenStage&&completed?'working':'Starting'));
   card.innerHTML='<div class="generationProgressHead"><strong>'+esc(status)+'</strong><span class="generationPercent">'+esc(badge)+'</span></div><small>'+esc(detail)+'</small><i><b style="width:'+pct+'%"></b></i>'+(sc.status==='running'?'<small class="generationElapsed">Observed '+esc(fmtEstimate(elapsed).replace('about ',''))+'</small>':'');
   return card;
 }
@@ -1496,6 +1524,7 @@ function renderClipInsp(body, hint, id) {
 
   const clipPanel=panelById.clip;
   identityFields.forEach(field=>clipPanel.appendChild(field));
+  clipPanel.appendChild(appliedEffectsField(c,activate));
   clipPanel.appendChild(numField('Timeline start', c.start, 0, 9999, 0.01, v => putClip(c, { start: v })));
   clipPanel.appendChild(numField('Trim in', c.in, 0, m ? m.duration : 9999, 0.01, v => putClip(c, { in: Math.min(v, c.out - 0.05) })));
   clipPanel.appendChild(numField('Trim out', c.out, 0, (m && m.kind === 'image') ? 60 : (m ? m.duration : 9999), 0.01, v => putClip(c, { out: Math.max(v, c.in + 0.05) })));
@@ -1538,7 +1567,7 @@ function renderClipInsp(body, hint, id) {
     for (const ty of types) {
       const b = document.createElement('button'); b.textContent = ty;
       b.addEventListener('click', () => {
-        const items=transitionItems(c).map(x=>({...x})),item={id:'tr-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),type:ty,edge:'start',dur:Math.min(.5,Math.max(.05,c.out-c.in)),enabled:true};items.push(item);selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:transitionPayload(items)});
+        const items=transitionItems(c).map(x=>({...x})),item={id:'tr-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),type:ty,edge:'start',dur:Math.min(.5,Math.max(.05,c.out-c.in)),enabled:true};items.push(item);playTime=c.start+item.dur/2;drawNow();selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:transitionPayload(items)});
       });
       seg.appendChild(b);
     }
@@ -1547,12 +1576,12 @@ function renderClipInsp(body, hint, id) {
   }
   if(isAudio){
     clipPanel.appendChild(precisionRangeField('Volume',Number.isFinite(+c.volume)?+c.volume:1,0,2,.01,v=>{c.volume=v;drawNow();},v=>putClip(c,{volume:v},false),'×'));
-    clipPanel.appendChild(audioFadeField(c));
   }else{
     const effects=panelById.effects;
     effects.appendChild(blurEffectField(c));
     effects.appendChild(maskEffectField(c));
   }
+  if(isAudio||isVideo){clipPanel.appendChild(audioFadeField(c));clipPanel.appendChild(audioProcessingField(c));}
   clipPanel.appendChild(toggleRow('Mute clip', c.muted, v => putClip(c, { muted: v })));
   const del = div('field'); const db = document.createElement('button'); db.className = 'btn ghost'; db.textContent = 'Delete clip';
   db.style.color = 'var(--err)'; db.addEventListener('click', () => deleteClip(c)); del.appendChild(db); clipPanel.appendChild(del);
@@ -1775,14 +1804,49 @@ function transformKeyframesField(c) {
   if (revealSelectedKeyframe && selectedKeyframe && selectedKeyframe.clipId===c.id) { revealSelectedKeyframe=false; requestAnimationFrame(()=>{const active=f.querySelector('.keyframePoint.selected');if(active)active.scrollIntoView({block:'nearest'});}); }
   return f;
 }
+function audioProcessingField(c){
+  const field=div('field'),label=document.createElement('label');label.textContent='Audio processing';field.appendChild(label);
+  const value={...(c.audioProcessing||{})};
+  for(const [key,name] of [['voice','Voice filter'],['denoise','Noise reduction'],['compress','Compression'],['loudness','Loudness normalization']])field.appendChild(toggleRow(name,!!value[key],enabled=>putClip(c,{audioProcessing:{...value,[key]:enabled}})));
+  return field;
+}
+function appliedEffectsField(c,activate){
+  const field=div('field appliedEffects');
+  const title=document.createElement('label');title.textContent='Applied effects';field.appendChild(title);
+  const note=div('effectStatus');note.textContent='Different types combine. Presets replace previous preset settings on the chosen clips.';field.appendChild(note);
+  const definitions=[
+    ['transitions','Transitions','transitions',transitionItems(c).length>0,{transition:{items:[]}}],
+    ['transforms','Motion & reframing','transform',!!c.keyframes||(c.motion&&c.motion.type!=='none')||!!c.position&&(+c.position.x!==0||+c.position.y!==0)||!!c.zoom&&c.zoom!==1,{zoom:1,position:{x:0,y:0},motion:{type:'none'},keyframes:null}],
+    ['color','Color','color',!!c.color,{color:null}],
+    ['blur','Blur','effects',!!c.blur,{blur:null}],
+    ['overlays','Mask / overlay layout','effects',!!c.mask,{mask:null}],
+    ['audio','Audio fades','clip',!!c.audioFade,{audioFade:null}],
+    ['audio_cleanup','Audio processing','clip',!!c.audioProcessing,{audioProcessing:null}],
+    ['pacing','Preset pacing','clip',!!(c.magiaEffects||{}).pacing,{}]
+  ];
+  let count=0;
+  for(const [key,label,tab,present,reset] of definitions){
+    const categories=key==='audio_cleanup'?['audio_cleanup','loudness']:[key];
+    const owned=categories.some(category=>Object.prototype.hasOwnProperty.call(c.magiaEffects||{},category));
+    if(!present&&!owned)continue;count++;
+    const row=div('appliedEffectRow'),text=document.createElement('span');text.textContent=label+(owned?' · '+((c.magiaRecipe||{}).name||'Magia'):'');row.appendChild(text);
+    const edit=document.createElement('button');edit.className='btn ghost';edit.textContent='Edit';edit.addEventListener('click',()=>activate(tab));row.appendChild(edit);
+    const remove=document.createElement('button');remove.className='btn ghost';remove.textContent=owned?'Restore':'Remove';remove.title=owned?'Restore settings from before this preset':'Remove '+label;remove.addEventListener('click',()=>putClip(c,owned?{removeMagiaEffects:categories}:reset));row.appendChild(remove);field.appendChild(row);
+  }
+  if(!count){const empty=div('effectStatus');empty.textContent='No effects applied.';field.appendChild(empty);}
+  return field;
+}
+
 function transitionStackField(c) {
   const clipDur=Math.max(.05,c.out-c.in),f=div('field keyframeField transitionEditor'),items=transitionItems(c).map(x=>({...x}));
-  const top=div('keyframeHead');top.innerHTML='<div><label>Transition stack</label><small>Choose the clip edge, toggle effects, and edit each diamond independently.</small></div>';f.appendChild(top);
+  const top=div('keyframeHead');top.innerHTML='<div><label>Transition stack</label><small>Latest enabled transition wins on each edge. Disable or remove it to reveal the previous one.</small></div>';f.appendChild(top);
   const list=div('keyframeList');
   items.forEach((item,index)=>{
     const selected=selectedTransition&&selectedTransition.clipId===c.id&&selectedTransition.transitionId===item.id;
     const card=div('keyframePoint transitionPoint'+(selected?' selected':'')+(item.enabled===false?' disabled':''));card.dataset.transitionId=item.id;
-    const head=div('keyframePointHead');head.innerHTML='<b>◆ '+esc(item.type)+' '+((item.edge||'start')==='end'?'end':'start')+'</b><span>'+clamp(+item.dur||0,0,clipDur).toFixed(2)+'s</span>';head.addEventListener('click',()=>{selectedTransition={clipId:c.id,transitionId:item.id};playTime=c.start+((item.edge||'start')==='end'?clipDur-item.dur:item.dur);drawNow();renderTimeline();renderInspector();});card.appendChild(head);
+    const head=div('keyframePointHead');head.innerHTML='<b>◆ '+esc(item.type)+' '+((item.edge||'start')==='end'?'end':'start')+'</b><span>'+clamp(+item.dur||0,0,clipDur).toFixed(2)+'s</span>';head.addEventListener('click',()=>{selectedTransition={clipId:c.id,transitionId:item.id};playTime=c.start+((item.edge||'start')==='end'?clipDur-item.dur/2:item.dur/2);drawNow();renderTimeline();renderInspector();});card.appendChild(head);
+    const status=div('effectStatus');status.textContent=item.enabled===false?'Disabled':+item.dur<=0?'Zero duration':enabledTransitions(c,item.edge||'start').some(x=>x.id===item.id)?'Active on this edge':'Overridden by a later transition';card.appendChild(status);
+    const type=document.createElement('select');type.className='txt';type.setAttribute('aria-label','Transition type');for(const name of ['dissolve','fade','wipe','slide','circle']){const option=document.createElement('option');option.value=name;option.textContent=name;type.appendChild(option);}type.value=item.type;type.addEventListener('change',()=>{item.type=type.value;putClip(c,{transition:transitionPayload(items)});});card.appendChild(type);
     const remove=document.createElement('button');remove.className='keyframeRemove';remove.textContent='×';remove.title='Remove transition';remove.addEventListener('click',()=>{const next=items.filter(x=>x.id!==item.id);if(selectedTransition&&selectedTransition.transitionId===item.id)selectedTransition=null;putClip(c,{transition:transitionPayload(next)});});card.appendChild(remove);
     const edge=div('transitionEdge seg');['start','end'].forEach(value=>{const b=document.createElement('button');b.textContent=value==='start'?'Clip start':'Clip end';if((item.edge||'start')===value)b.classList.add('on');b.addEventListener('click',()=>{item.edge=value;c.transition=transitionPayload(items);selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:c.transition});});edge.appendChild(b);});card.appendChild(edge);
     const grid=div('keyframeGrid'),control=div('keyframeControl');control.innerHTML='<label>Duration (s)</label>';const input=document.createElement('input');input.type='number';input.min=0;input.max=clipDur;input.step=.01;input.value=clamp(+item.dur||0,0,clipDur).toFixed(2);input.addEventListener('focus',()=>{selectedTransition={clipId:c.id,transitionId:item.id};input.select();card.classList.add('selected');});input.addEventListener('input',()=>{if(input.value==='')return;const dur=clamp(+input.value,0,clipDur);if(Number.isFinite(dur)){item.dur=dur;c.transition=transitionPayload(items);playTime=c.start+((item.edge||'start')==='end'?clipDur-dur:dur);drawNow();renderTimeline();}});input.addEventListener('change',()=>putClip(c,{transition:transitionPayload(items)}));control.appendChild(input);grid.appendChild(control);
@@ -1888,7 +1952,7 @@ function renderActivePromptSkill() {
 }
 const MODEL_CATALOG = [
   { id: 'h3', name: 'MiniMax H3', type: 'Video', detail: 'Local h3.c engine · 24fps · 4–15s', available: true },
-  { id: 'music', name: 'MiniMax Music', type: 'Music', detail: 'Music generation · coming soon', available: false }
+  { id: 'music', name: 'YuE 2', type: 'Music', detail: 'Music generation · runtime not detected', available: false }
 ];
 let selectedModel = 'h3';
 let composerPickerMode = 'prompt';
@@ -1980,7 +2044,7 @@ function renderComposerPicker() {
       b.addEventListener('click', () => { closeComposerPicker(); openSkillDetail({...t,scope:'style',description:t.tagline,icon:'✦'}, 'style-picker'); }); wrap.appendChild(b);
     }
   } else {
-    for (const skill of [...customSkills(),...SKILL_CATALOG].filter(s => (s.name + ' ' + s.id + ' ' + s.description).toLowerCase().includes(q))) {
+    for (const skill of [...customSkills(),...SKILL_CATALOG].filter(s => s.type !== 'music' && (s.name + ' ' + s.id + ' ' + s.description).toLowerCase().includes(q))) {
       const b = document.createElement('button'); b.className = 'pickerRow skillPickerRow' + (activePromptSkill && activePromptSkill.id === skill.id ? ' on' : '');
       b.innerHTML = '<span class="skillPickerPreview'+(skill.custom?' customSkillArt':'')+'">'+skillPreviewMarkup(skill,'picker')+'</span><span><strong>' + esc(skill.name) + ' <code>/' + esc(skill.id) + '</code></strong><small>' + esc(skill.description) + '</small></span><em>'+(skill.custom?'Custom':'Prompt')+'</em>';
       bindSkillPreviewFallback(b);
@@ -2013,7 +2077,7 @@ function renderPickerDetail() {
     $('#pickerApply').addEventListener('click',()=>{if(selRefs.has(item.id))selRefs.delete(item.id);else{const next=[...selRefs,item.id],error=referenceSelectionError(next);if(error&&!error.startsWith('Add at least one image')){toast(error,'err');return;}selRefs.add(item.id);}normalizeCharacterReferenceSelection();renderGenerate();closeComposerPicker();});
     $('#composerPicker').classList.add('detail-open');return;
   }
-  const body = castMode ? 'Include this character’s ordered identity references in the next generation.' : sourceMode ? (item.kind === 'image' ? 'This still image will become the opening visual reference for the generated scene.' : 'Choose whether the first or last frame of this media should become the opening visual reference.') : modelMode ? (item.id === 'h3' ? 'Creates synchronized video and audio locally through h3.c. Accepts 4–15 seconds at 24fps, up to nine ordered images, and up to three audio references totaling 15 seconds.' : 'Reserved for the MiniMax Music workflow. It will use music-specific skills and controls when the model is installed.')
+  const body = castMode ? 'Include this character’s ordered identity references in the next generation.' : sourceMode ? (item.kind === 'image' ? 'This still image will become the opening visual reference for the generated scene.' : 'Choose whether the first or last frame of this media should become the opening visual reference.') : modelMode ? (item.id === 'h3' ? 'Creates synchronized video and audio locally through h3.c. Accepts 4–15 seconds at 24fps, up to nine ordered images, and up to three audio references totaling 15 seconds.' : 'Composes a finished song from a style description and lyrics. It takes no length, tempo, key, reference audio, or negative prompt - YuE 2 has no such argument, so OpenMagia offers none.')
     : styleMode ? item.style : promptSkillInstruction(item);
   const steps = item.steps || (item.defaults ? Object.entries(item.defaults).map(([k,v]) => k + ': ' + v) : []);
   const sourceGenerating = sourceMode && ['queued','running'].includes(item.status);
@@ -2135,7 +2199,7 @@ function storyboardReferenceItems(card){
   for(const mid of card.reference_media_ids||[]){const media=mediaById(mid);if(media)items.push({media,label:media.name,type:'reference'});}
   return items;
 }
-function storyboardPromptSkills(){return [...customSkills(),...SKILL_CATALOG];}
+function storyboardPromptSkills(){return [...customSkills(),...SKILL_CATALOG.filter(skill=>skill.type!=='music')];}
 function storyboardPromptSkill(card){return storyboardPromptSkills().find(skill=>skill.id===card.prompt_skill_id)||null;}
 async function storyboardSkillWithSpecification(card){
   const skill=storyboardPromptSkill(card);if(!skill)return null;
@@ -2363,18 +2427,84 @@ function renderGenerate() {
   const aspect=$('#genAspect');if(aspect)aspect.value=canvasAspect(state.canvas);
 }
 
+function syncMusicModelCard(){const runtime=musicRuntime(),entry=(typeof MODEL_CATALOG!=='undefined'?MODEL_CATALOG:[]).find(item=>item.id==='music');if(!entry)return;
+  entry.available=musicReady();
+  entry.detail=runtime?(runtime.ready?('Song composer · '+(runtime.device||'local runtime')+' · description, lyrics, plan, score, seed'):('Not ready · '(((runtime.missing||[]).join(' · '))||'no runtime selected'))):'Music generation · runtime not detected';
+  entry.note=runtime&&!runtime.ready?'Install YuE 2 in Models':'';}
 function applyGenerationType() {
+  syncMusicModelCard();
   const select=$('#genType'),controls=$('#videoGenerationControls'),notice=$('#generationTypeNotice'),button=$('#genBtn');
   if(!select||!controls||!notice||!button)return;
   const type=select.value||'video';
   if(!select.value)select.value='video';
-  const isVideo=type==='video',isImage=type==='image',isStoryboard=type==='storyboard';controls.hidden=!(isVideo||isImage);notice.hidden=isVideo||isImage;button.disabled=!(isVideo||isImage)||generationSubmitting;
-  $('#generate').classList.toggle('imageMode',isImage);
-  button.querySelector('span').textContent=generationSubmitting?'Generating…':(isImage?'Generate image':isVideo?'Generate scene':'Generation unavailable');
+  const isVideo=type==='video',isImage=type==='image',isStoryboard=type==='storyboard',isMusic=type==='music';
+  const musicBox=$('#musicGenerationControls');const musicOk=isMusic&&musicReady();
+  controls.hidden=!(isVideo||isImage);if(musicBox)musicBox.hidden=!isMusic;
+  notice.hidden=isVideo||isImage;button.disabled=!(isVideo||isImage||isMusic)||isMusic&&!musicOk||generationSubmitting;
+  $('#generate').classList.toggle('imageMode',isImage);$('#generate').classList.toggle('musicMode',isMusic);
+  button.querySelector('span').textContent=generationSubmitting?'Generating…':(isMusic?'Generate song':isImage?'Generate image':isVideo?'Generate scene':'Generation unavailable');
   $('#genPrompt').placeholder=isImage?'Describe one finished image: subject, composition, environment, lighting, materials, and exact text…':'Describe the scene, action, camera, dialogue or visible text…';
   if(isImage){notice.innerHTML='';sourceSelection=null;renderSourceContext();}
   else if(isStoryboard){notice.innerHTML='<strong>Build a continuous multi-scene sequence</strong><span>Use one project style and output setup across horizontally arranged scene prompts. Previous-frame continuity is enabled by default.</span><button id="openStoryboardBtn" class="btn primary" type="button">Open storyboard full screen</button>';$('#openStoryboardBtn').addEventListener('click',openStoryboard);}
-  else if(!isVideo){notice.innerHTML='<strong>Music generation is coming soon</strong><span>Select Video, Storyboard, or Image to use the currently available generation controls.</span>';}
+  else if(isMusic){notice.innerHTML=musicNoticeMarkup();const jump=$('#musicGoSettings');if(jump)jump.addEventListener('click',()=>setHubView('settings'));bindMusicComposer();compileMusicPreview(true);}
+}
+
+/* YuE 2 composer. The fields here mirror the request schema and nothing else: style
+   description, lyrics, planning mode, optional ABC score, seed. Length, tempo, key,
+   reference audio and negative prompts are absent because YuE 2 has no argument for
+   them - the compile sheet says where anything written for them actually goes. */
+let musicSkillId='song-director',musicCompileTimer=null,musicBound=false;
+function musicRuntime(){return (engine&&engine.music)||null;}
+function musicReady(){const runtime=musicRuntime();return !!(runtime&&runtime.ready);}
+function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal');
+  return {plan_mode:plan?plan.value:'full',lyrics:$('#musicLyrics')?$('#musicLyrics').value:'',
+    abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
+    seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
+function musicSkills(){return [{id:'',name:'No skill',description:'Use the description and lyrics as written'},...SKILL_CATALOG.filter(item=>item.type==='music')];}
+function renderMusicSkills(){const box=$('#musicSkills');if(!box)return;
+  box.innerHTML=musicSkills().map(item=>'<button type="button" role="radio" aria-checked="'+(item.id===musicSkillId)+'" class="musicSkill'+(item.id===musicSkillId?' on':'')+'" data-music-skill="'+esc(item.id)+'"><b>'+esc(item.icon||'♫')+' '+esc(item.name)+'</b><small>'+esc(item.description||item.detail||'')+'</small></button>').join('');
+  $$('[data-music-skill]',box).forEach(button=>button.addEventListener('click',()=>{musicSkillId=button.dataset.musicSkill;renderMusicSkills();compileMusicPreview(true);}));}
+function musicNoticeMarkup(){const runtime=musicRuntime();
+  if(!runtime)return '<strong>Music runtime state unavailable</strong><span>Reload OpenMagia, or open Models and check again.</span>';
+  if(runtime.ready)return '<strong>YuE 2 · '+(runtime.device?esc(runtime.device):'this machine')+'</strong><span>A song renders in one pass and lands on the audio track when it finishes. Stopping early keeps nothing: YuE 2 decodes audio only at the end.</span>';
+  const missing=(runtime.missing||[]).map(esc).join(' · ');
+  return '<strong>No music runtime ready</strong><span>'+(missing||'YuE 2 is not reachable.')+
+    (runtime.local&&runtime.local.installed?'':' Install the runtime first: 7.3 GB model + 0.53 GB VAE, Apache 2.0.')+
+    ' <button id="musicGoSettings" class="btn primary" type="button">Open Models</button></span>';}
+async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||($('#genType')||{}).value!=='music')return;
+  const prompt=($('#musicPrompt')||{}).value||'',params=musicComposerParams();
+  if(!prompt.trim()&&!String(params.lyrics).trim()){box.innerHTML='<small>Describe the song or write lyrics to see exactly what YuE 2 will receive.</small>';return;}
+  const run=async()=>{box.innerHTML='<small>Compiling the request…</small>';
+    try{const out=await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId}});
+      const warnings=(out.warnings||[]).map(w=>'<li class="'+esc(w.level||'info')+'">'+esc(w.text||'')+'</li>').join('');
+      const moved=(out.lyric_lines_removed||[]).filter(line=>line.moved_to).map(line=>'<li><b>'+esc(line.line)+'</b> → '+esc(line.moved_to)+'</li>').join('');
+      const band=Array.isArray(out.estimated_band)?out.estimated_band:[];
+      box.innerHTML='<div class="musicCompileHead"><b>'+esc(out.summary||(out.request&&out.request.cot==='off'?'Straight to audio':'Full plan'))+'</b>'+
+        (band.length?'<span>YuE 2 sets the length · expect roughly '+esc(String(band[0]))+'–'+esc(String(band[1]))+' s</span>':'')+'</div>'+
+        (out.sections&&out.sections.length?'<div class="musicSections">'+out.sections.map(s=>'<span>'+esc(s)+'</span>').join('')+'</div>':'')+
+        (warnings||moved?'<ul class="musicWarnings">'+warnings+moved+'</ul>':'<ul class="musicWarnings ok"><li>Nothing was changed: lyric reaches the model as written.</li></ul>')+
+        '<small>'+esc(String(out.sung_lines||0))+' sung lines · '+esc(String(out.style_chars||0))+' style characters'+(out.request&&out.request.abc?' · score-conditioned':'')+'</small>';}
+    catch(error){box.innerHTML='<ul class="musicWarnings error"><li>'+esc(error.message)+'</li></ul>';}};
+  if(musicCompileTimer)clearTimeout(musicCompileTimer);
+  if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
+function bindMusicComposer(){if(musicBound)return;musicBound=true;
+  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>compileMusicPreview(false));});
+  const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
+  const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{refine.disabled=true;refine.textContent='Refining…';try{const out=await api('/api/music/refine',{method:'POST',body:{prompt:$('#musicPrompt').value,lyrics:$('#musicLyrics').value,prompt_skill_id:musicSkillId}});$('#musicPrompt').value=out.style||$('#musicPrompt').value;$('#musicLyrics').value=out.lyrics||$('#musicLyrics').value;toast(out.used_ai?'Music direction refined':'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
+  const manage=$('#musicManageBtn');if(manage)manage.addEventListener('click',()=>setHubView('settings'));
+  const clear=$('#musicClearBtn');if(clear)clear.addEventListener('click',()=>{const box=$('#musicLyrics');if(box.value&&!confirm('Clear the lyrics in this composer?'))return;if(box){box.value='';compileMusicPreview(true);}});
+  renderMusicSkills();}
+async function generateMusic(){
+  if(generationSubmitting)return;
+  const idea=$('#musicPrompt').value.trim(),lyrics=($('#musicLyrics')||{}).value||'';
+  if(!idea&&!lyrics.trim()){toast('Describe the song or write lyrics first','err');return;}
+  generationSubmitting=true;const button=$('#genBtn');button.disabled=true;button.setAttribute('aria-busy','true');
+  try{const name=(idea.split(/\n/)[0]||lyrics.split(/\n/).find(l=>l&&!l.startsWith('['))||'Untitled song').replace(/^#\s*/,'').slice(0,60);
+    const scene=await api('/api/scenes',{method:'POST',body:{name,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,params:musicComposerParams()}});
+    await api('/api/scenes/'+scene.id+'/generate',{method:'POST',body:{}});
+    toast('Song queued · '+scene.name,'ok');await refresh(true);
+  }catch(error){toast(error.message,'err');}
+  finally{generationSubmitting=false;if(button){button.removeAttribute('aria-busy');applyGenerationType();}}
 }
 
 function canvasAspect(canvas){return canvas.width===canvas.height?'1:1':canvas.width<canvas.height?'9:16':'16:9';}
@@ -2422,6 +2552,7 @@ function renameScene(s) {
 }
 
 async function generate() {
+  if ($('#genType') && $('#genType').value === 'music') return generateMusic();
   if (generationSubmitting) return;
   const generationType=$('#genType').value==='image'?'image':'video';
   const prompt = $('#genPrompt').value.trim();
@@ -3334,9 +3465,9 @@ function splitAtPlayhead() {
   const leftOut = target.out,originalDuration=Math.max(.05,leftOut-target.in),splitRatio=clamp(localIn/originalDuration,.0001,.9999),[leftKeyframes,rightKeyframes]=splitTransformKeyframes(target,splitRatio),clone=value=>value==null?value:JSON.parse(JSON.stringify(value));
   target.out = newIn;target.keyframes=leftKeyframes;
   const right = { id: null, mediaId: target.mediaId, start: playTime, in: newIn, out: leftOut,
-    zoom: target.zoom,position:clone(target.position),motion:clone(target.motion),keyframes:rightKeyframes,color:clone(target.color),audioFade:clone(target.audioFade),volume:target.volume,transition:clone(target.transition)||{type:'cut',dur:0},muted:target.muted,detached:target.detached };
+    zoom: target.zoom,position:clone(target.position),motion:clone(target.motion),keyframes:rightKeyframes,color:clone(target.color),audioFade:clone(target.audioFade),audioProcessing:clone(target.audioProcessing),volume:target.volume,transition:clone(target.transition)||{type:'cut',dur:0},muted:target.muted,detached:target.detached };
   api('/api/clips/' + target.id, { method: 'PUT', body: { out: target.out,keyframes:leftKeyframes } })
-    .then(() => api('/api/clips', { method: 'POST', body: { trackId: tr.id, mediaId: right.mediaId, start: right.start, in: right.in, out: right.out, zoom: right.zoom,position:right.position,motion:right.motion,keyframes:right.keyframes,color:right.color,audioFade:right.audioFade,volume:right.volume,transition:right.transition,muted:right.muted,detached:right.detached } }))
+    .then(() => api('/api/clips', { method: 'POST', body: { trackId: tr.id, mediaId: right.mediaId, start: right.start, in: right.in, out: right.out, zoom: right.zoom,position:right.position,motion:right.motion,keyframes:right.keyframes,color:right.color,audioFade:right.audioFade,audioProcessing:right.audioProcessing,volume:right.volume,transition:right.transition,muted:right.muted,detached:right.detached } }))
     .then(() => { toast('Split clip', 'ok'); refresh(); })
     .catch(e => toast(e.message, 'err'));
 }
@@ -3388,12 +3519,21 @@ function doExport() {
 }
 
 /* ---------------- timeline Magia ---------------- */
+const TIMELINE_MAGIA_EXAMPLES={
+  subtle:{label:'Subtle continuity',text:'Soft dissolves, tiny reframes, near-invisible trims, natural grade, no decorative overlays.'},
+  narrative:{label:'Clean narrative',text:'Purposeful pacing, restrained movement, one motivated visual echo, smooth audio edges.'},
+  social:{label:'Social energy',text:'Tighter cuts, bolder motion, punchier color, brief picture-in-picture accents.'},
+  cinematic:{label:'Cinematic restraint',text:'Slow fades, gentle camera drift, controlled contrast, sparse overlays and longer audio tails.'},
+  'audio-first':{label:'Audio-first clarity',text:'Dialogue-friendly timing, minimal motion, simple dissolves and the smoothest audio edges.'}
+};
+function selectTimelineMagiaRecipe(id,plan=true){timelineMagiaRecipe=TIMELINE_MAGIA_EXAMPLES[id]?id:'subtle';$$('[data-magia-recipe]').forEach(button=>button.classList.toggle('on',button.dataset.magiaRecipe===timelineMagiaRecipe));const example=TIMELINE_MAGIA_EXAMPLES[timelineMagiaRecipe];$('#timelineMagiaExamples').innerHTML='<b>'+esc(example.label)+'</b><p>'+esc(example.text)+'</p>';if(plan)scheduleTimelineMagiaPlan();}
+function renderTimelineMagiaApplied(){const applied=(state||{}).timelineMagia||{};const host=$('#timelineMagiaApplied');if(!applied.recipe_id){host.hidden=true;host.textContent='';return;}const recipe=TIMELINE_MAGIA_EXAMPLES[applied.recipe_id];host.hidden=false;host.textContent='Currently applied: '+(recipe?recipe.label:applied.profile||applied.recipe_id);}
 function timelineMagiaOptions(){
   return Object.fromEntries($$('[data-timeline-magia-option]').map(input=>[input.dataset.timelineMagiaOption,input.checked]));
 }
-function timelineMagiaSelectedClip(){return sel&&sel.type==='clip'?findClip(sel.id):null;}
+function timelineMagiaSelectedClip(){const c=sel&&sel.type==='clip'?findClip(sel.id):null;return c&&trackOfClip(c).kind==='video'?c:null;}
 function timelineMagiaPayload(useAI=false){
-  return {seed:timelineMagiaSeed,direction:$('#timelineMagiaDirection').value.trim(),scope:$('#timelineMagiaScope').value,
+  return {seed:timelineMagiaSeed,recipe_id:timelineMagiaRecipe,direction:$('#timelineMagiaDirection').value.trim(),scope:$('#timelineMagiaScope').value,
     selected_clip_id:(timelineMagiaSelectedClip()||{}).id||'',options:timelineMagiaOptions(),use_ai:useAI};
 }
 function renderTimelineMagiaPlan(plan){
@@ -3407,6 +3547,8 @@ function renderTimelineMagiaPlan(plan){
   if(summary.color)facts.push(summary.color+' color pass'+(summary.color===1?'':'es'));
   if(summary.trimmed)facts.push(summary.trimmed+' tightened');
   if(summary.overlays)facts.push(summary.overlays+' overlay'+(summary.overlays===1?'':'s'));
+  if(summary.audio_cleanup)facts.push(summary.audio_cleanup+' voice cleanups');
+  if(summary.loudness)facts.push(summary.loudness+' loudness passes');
   const rows=(plan.updates||[]).slice(0,7).map(update=>{const changes=(update.changes||[]).join(', ')||'audio polish';return '<li><strong>'+esc(update.name||'Clip')+'</strong><span>'+esc(changes.charAt(0).toUpperCase()+changes.slice(1)+'.')+'</span></li>';}).join('');
   host.innerHTML='<div class="timelineMagiaSummary"><strong>'+esc(plan.profile||'Balanced edit')+'</strong><span>'+esc(facts.join(' · ')||((summary.clips||0)+' clips'))+'</span></div>'+(plan.direction&&plan.direction_note?'<p class="timelineMagiaDirectionNote">'+esc(plan.direction_note)+(plan.used_ai?' · Refined':'')+'</p>':'')+'<ul>'+rows+'</ul>'+
     ((plan.updates||[]).length>7?'<small>+'+((plan.updates||[]).length-7)+' more</small>':'');
@@ -3426,7 +3568,7 @@ async function requestTimelineMagiaPlan(remix=false,useAI=false){
   timelineMagiaError='';
   timelineMagiaInterpreting=useAI&&!!$('#timelineMagiaDirection').value.trim();
   setTimelineMagiaBusy(true);
-  try{timelineMagiaPlan=await api('/api/timeline/magia/plan',{method:'POST',body:timelineMagiaPayload(useAI)});return timelineMagiaPlan;}
+  try{const requested=timelineMagiaRecipe;timelineMagiaPlan=await api('/api/timeline/magia/plan',{method:'POST',body:timelineMagiaPayload(useAI)});if(timelineMagiaPlan.recipe_id!==requested)throw new Error('Restart OpenMagia to activate the selected Magia recipes.');return timelineMagiaPlan;}
   catch(error){timelineMagiaPlan=null;timelineMagiaError=error.status===404?'Restart OpenMagia to load timeline Magia.':error.message;toast(timelineMagiaError,'err');return null;}
   finally{timelineMagiaInterpreting=false;setTimelineMagiaBusy(false);}
 }
@@ -3439,8 +3581,15 @@ function openTimelineMagia(){
   if(!hasVideo)return toast('Add a video clip to the timeline first','err');
   const selected=timelineMagiaSelectedClip();
   const selectedOption=$('#timelineMagiaScope option[value="selected"]');
+  selectedOption.textContent=selected?'Selected clip · '+((mediaById(selected.mediaId)||{}).name||selected.id)+' on '+trackOfClip(selected).name:'Selected clip';
   selectedOption.disabled=!selected;
+  const applied=(state||{}).timelineMagia||{};
   $('#timelineMagiaScope').value='timeline';
+  $('#timelineMagiaDirection').value=applied.direction||'';
+  const appliedOptions=applied.options||{};
+  $$('[data-timeline-magia-option]').forEach(input=>{if(Object.prototype.hasOwnProperty.call(appliedOptions,input.dataset.timelineMagiaOption))input.checked=!!appliedOptions[input.dataset.timelineMagiaOption];});
+  selectTimelineMagiaRecipe(applied.recipe_id||timelineMagiaRecipe||'subtle',false);
+  renderTimelineMagiaApplied();
   timelineMagiaPlan=null;timelineMagiaError='';timelineMagiaSeed=0;
   const sheet=$('#timelineMagiaSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');
   requestAnimationFrame(()=>$('#timelineMagiaDirection').focus({preventScroll:true}));
@@ -3466,9 +3615,12 @@ async function applyTimelineMagia(){
   }
   const button=$('#timelineMagiaApply'),label=button.textContent;button.disabled=true;button.textContent='Applying…';
   try{
+    const requested=timelineMagiaRecipe;
     const result=await api('/api/timeline/magia/apply',{method:'POST',body:timelineMagiaPayload(true)});
+    if(result.recipe_id!==requested)throw new Error('Restart OpenMagia to activate the selected Magia recipes.');
+    if(!result.applied)throw new Error('The selected recipe did not produce any timeline changes.');
     closeTimelineMagia();await refresh(true);
-    toast('Magia applied to '+result.applied+' clip'+(result.applied===1?'':'s'),'ok');
+    toast((result.profile||'Magia')+' applied to '+result.applied+' clip'+(result.applied===1?'':'s'),'ok');
   }catch(error){toast(error.status===404?'Restart OpenMagia to load timeline Magia.':error.message,'err');}
   finally{button.textContent=label;button.disabled=false;}
 }
@@ -3610,7 +3762,7 @@ function setHubView(view) {
 function modelSettingsFingerprint(value){const installs=value.model_installs||{};return JSON.stringify([value.h3_bin_ok,value.fl2va,value.ref2va,value.formatter,value.ffmpeg,Object.entries(installs).sort(([a],[b])=>a.localeCompare(b)).map(([id,job])=>[id,job?.status||''])]);}
 function updateModelInstallProgress(){
   const installs=engine.model_installs||{};
-  for(const [component,verb] of [['h3','Downloading'],['formatter','Installing'],['runtime','Installing']]){
+  for(const [component,verb] of [['h3','Downloading'],['formatter','Installing'],['runtime','Installing'],['yue','Installing']]){
     const job=installs[component]||{};
     if(job.status!=='running')continue;
     const label=verb+'…'+(Number.isFinite(job.progress)?' '+job.progress+'%':'');
@@ -3623,8 +3775,9 @@ function closeModelLicense(){modelLicenseState=null;const sheet=$('#modelLicense
 function openModelLicense(item){
   modelLicenseState={component:item.install_component||item.id,name:item.name};
   $('#modelLicenseTitle').textContent='Install '+item.name;
-  $('#modelLicenseSubtitle').textContent='Review and accept the MiniMax H3 terms before the download begins.';
-  $('#modelLicenseBody').innerHTML='<div class="licenseReview"><p>This backend uses MiniMax H3 weights and is governed by the MiniMax H3 Community License. OpenMagia will download the backend into this computer’s managed models folder.</p><a class="btn ghost" href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener">Read the complete license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the MiniMax H3 license.</span></label></div>';
+  const music=item.media==='music';
+  $('#modelLicenseSubtitle').textContent=music?'Review YuE 2 model terms before downloading.':'Review and accept the MiniMax H3 terms before the download begins.';
+  $('#modelLicenseBody').innerHTML=music?'<div class="licenseReview"><p>YuE 2 code is Apache-2.0. Its model weights are CC BY-NC 4.0 and download to this user’s Hugging Face cache; the runtime stays in the ignored <code>addons/yue</code> folder.</p><a class="btn ghost" href="https://github.com/multimodal-art-projection/YuE/blob/main/MODEL_LICENSE" target="_blank" rel="noopener">Read the model license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the YuE 2 model license.</span></label></div>':'<div class="licenseReview"><p>This backend uses MiniMax H3 weights and is governed by the MiniMax H3 Community License. OpenMagia will download the backend into this computer’s managed models folder.</p><a class="btn ghost" href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener">Read the complete license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the MiniMax H3 license.</span></label></div>';
   const confirm=$('#modelLicenseConfirm');confirm.disabled=true;confirm.textContent='Accept and download';
   $('#modelLicenseAccept').addEventListener('change',event=>{confirm.disabled=!event.target.checked;});
   const sheet=$('#modelLicenseSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#modelLicenseClose').focus({preventScroll:true});
@@ -3665,17 +3818,36 @@ async function renderSettings() {
   const installed=(management.installations||[]).filter(item=>item.available).map(item=>'<div class="managedModelRow"><span><b>'+esc(item.name||'MiniMax H3')+'</b><small>'+esc(item.path||'')+'</small></span><em>'+(item.active?'In use':'Installed')+'</em>'+(item.managed?'<button class="btn ghost danger" data-uninstall-model="'+esc(item.id)+'">Uninstall</button>':'<small>External</small>')+'</div>').join('')||'<p class="modelEmpty">No video models are installed on this computer. Choose one from Available.</p>';
   const availableItems=(management.catalog||[]).filter(item=>item.compatible);
   const available=availableItems.map(item=>{const job=(e.model_installs||{})[item.install_component]||{},running=job.status==='running',failed=job.status==='error',progress=Number.isFinite(job.progress)?' '+job.progress+'%':'';return '<div class="backendCard '+(item.recommended?'recommended ':'')+'"><div class="backendTitle"><b>'+esc(item.name)+'</b>'+(item.recommended?'<strong>Recommended</strong>':'')+'</div><p>'+esc(item.summary)+'</p><small>'+esc((item.memory_min||0)+' GB RAM minimum · '+item.disk_gb+' GB disk · '+item.stability)+'</small>'+(failed?'<small class="modelInstallError">'+esc(job.message||'Installation failed')+'</small>':'')+'<div class="backendActions">'+(item.installed?'<span>Installed</span>':item.requirements_met?'<button class="btn ghost" data-install-backend="'+esc(item.id)+'" data-install-component="'+esc(item.install_component)+'" '+(running?'disabled':'')+'>'+(running?'Downloading…'+progress:'Install')+'</button>':'<span>This computer does not meet the minimum requirements</span>')+'</div></div>';}).join('')||'<div class="modelUnavailable"><b>No integrated local H3 backend is available for this computer.</b><p>OpenMagia only lists runtimes it can install and execute end to end.</p></div>';
+  const music=management.music||{},musicSelection=music.selection||{},musicJob=(e.model_installs||{}).yue||{};
+  const musicCard='<article class="settingsCard modelSettings musicSettingsCard"><div class="settingsCardHead"><div><h2>Music · YuE 2</h2><small>A song composer, not a clip renderer: description, lyrics, planning, optional score, seed.</small></div><button class="btn ghost" id="musicCheck">Check again</button></div>'+
+    '<div class="musicStatusRow"><b>'+(music.ready?'Ready':'Not ready')+'</b><span>'+esc(musicSelection.label||(musicSelection.mode==='endpoint'?'Worker endpoint':'No runtime selected'))+'</span><em>'+(music.device?esc(music.device):'device not measured yet')+'</em></div>'+
+    (music.warnings||[]).map(w=>'<small class="modelInstallError">'+esc(w)+'</small>').join('')+
+    ((music.local?.missing||[]).length?'<small>Missing: '+esc((music.local?.missing||[]).join(', '))+'</small>':'')+
+    (musicJob.status==='running'?'<small class="modelInstallError">'+esc((musicJob.message||'Installing…').trim().split(/\n/).pop())+'</small>':'')+
+    (musicJob.status==='error'?'<small class="modelInstallError">'+esc((musicJob.message||'Installation failed').trim().split(/\n/).pop())+'</small>':'')+
+    '<div class="backendActions">'+(music.local?.installed?'<span class="musicInstalledTag">Local runtime installed</span>':'<button class="btn ghost" id="musicInstallBtn" '+(musicJob.status==='running'?'disabled':'')+'>'+(musicJob.status==='running'?'Installing…':'Install YuE 2 runtime')+'</button><small class="musicSizeNote">7.3 GB model + 0.53 GB VAE · CC BY-NC 4.0 · downloads start immediately</small>')+'</div>'+
+    '<details class="modelConnect"'+(musicSelection.mode==='endpoint'?' open':'')+'><summary>Use a worker on another computer</summary><div class="modelSelectionFields"><input class="txt" id="musicEndpoint" placeholder="http://gpu-box:8931"><input class="txt" id="musicToken" type="password" placeholder="worker token (optional)"><button class="btn primary" id="musicEndpointSave">Connect</button><button class="btn ghost" id="musicUseLocal">Use this machine</button></div><small>The worker is <code>yue_worker.py</code> from the OpenMagia repository: <code>python3 yue_worker.py --host 0.0.0.0 --port 8931 --token …</code> It holds one song at a time, so other tools can share the same GPU.</small></details>'+
+    ((music.unsupported||[]).length?'<div class="musicLimits"><b>Current YuE 2 limits</b><ul>'+(music.unsupported||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>':'')+
+    '</article>';
   const legacyLoras=(management.loras||[]).map(item=>'<div class="loraRow" data-lora="'+esc(item.id)+'"><span><b>'+esc(item.name)+'</b><small>Stored but inactive</small></span><button class="btn ghost danger" data-remove-lora>Remove file</button></div>').join('');
     body.innerHTML = '<article class="settingsCard modelSettings"><div class="settingsCardHead"><div><h2>Models</h2><small>Recommendations update automatically for the hardware running OpenMagia.</small></div></div>'+hardware+'<div class="modelManagerTabs" role="tablist"><button class="on" data-model-tab="installed">Installed</button><button data-model-tab="available">Available</button><button data-model-tab="addons">Add-ons</button></div><section class="modelManagerPane on" data-model-pane="installed"><div class="managedModelList">'+installed+'</div><details class="modelConnect"><summary>Connect an existing model</summary><section class="modelSelection"><div class="modelSelectionHead"><span>Models already downloaded outside OpenMagia</span><button class="btn ghost" id="detectModels">Scan</button></div><div class="modelSelectionFields"><label><select id="detectedModelSelect" class="txt" aria-label="Installed model" disabled><option>Scanning…</option></select></label><label><select id="detectedModelRole" class="txt" aria-label="Model role" disabled><option>Role</option></select></label><button class="btn primary" id="useSelectedModel" disabled>Use</button></div><div id="detectedModelMeta" class="modelSelectionMeta"></div></section></details></section><section class="modelManagerPane" data-model-pane="available"><div class="backendGrid">'+available+'</div></section><section class="modelManagerPane" data-model-pane="addons"><div class="modelInstallOptions">'+formatterInstall+runtimeInstall+'</div><div class="loraHead"><div><b>LoRA adapters</b><small>The current h3.c engine does not expose LoRA loading, so OpenMagia cannot apply adapters to generation yet.</small></div></div>'+(legacyLoras?'<div class="loraList">'+legacyLoras+'</div>':'')+'</section></article>' +
+    musicCard +
     '<article class="settingsCard aboutCard"><h2>About OpenMagia</h2><p>OpenMagia is a local-first visual workspace for composing, generating, and editing AI video.</p><div class="appVersionRow"><b>Version</b><span>'+esc(versionLabel)+'</span></div><div><b>Source code</b><a href="https://github.com/davidaircloud/OpenMagia" target="_blank" rel="noopener">GitHub repository ↗</a></div><div><b>License</b><span>AGPL-3.0-only</span></div><small>OpenMagia is free software under the GNU Affero General Public License v3.0 only and comes without warranty.</small></article>'+
-    '<article class="settingsCard noticesCard"><h2>Models and open-source notices</h2><div><b>MiniMax H3</b><span>© 2026 MiniMax · Community License</span></div><div><b>Qwen2.5 1.5B Instruct</b><span>Apache License 2.0</span></div><div><b>h3.c</b><span>© 2026 Salvatore Sanfilippo · MIT</span></div><div><b>ccv Metal kernels</b><span>© 2010 Liu Liu · BSD-3-Clause</span></div><div><b>llama.cpp / ggml</b><span>© 2023–2026 ggml authors · MIT</span></div><div><b>FFmpeg</b><span>LGPL 2.1+ / optional GPL components</span></div><small>Remaining application code uses the Python standard library and native browser APIs. Full terms remain with the bundled projects and linked model sources.</small></article>';
+    '<article class="settingsCard noticesCard"><h2>Models and open-source notices</h2><div><b>MiniMax H3</b><span>© 2026 MiniMax · Community License</span></div><div><b>Qwen2.5 1.5B Instruct</b><span>Apache License 2.0</span></div><div><b>YuE 2 runtime</b><span>m-a-p · Apache License 2.0</span></div><div><b>YuE 2 model weights</b><span>m-a-p · CC BY-NC 4.0</span></div><div><b>h3.c</b><span>© 2026 Salvatore Sanfilippo · MIT</span></div><div><b>ffmpeg-skill</b><span><a href="https://github.com/kajisho5/ffmpeg-skill/tree/v0.12.0" target="_blank" rel="noopener">v0.12.0</a> · © 2026 kajisho5 · MIT · workflow inspiration</span></div><div><b>ccv Metal kernels</b><span>© 2010 Liu Liu · BSD-3-Clause</span></div><div><b>llama.cpp / ggml</b><span>© 2023–2026 ggml authors · MIT</span></div><div><b>FFmpeg</b><span>LGPL 2.1+ / optional GPL components</span></div><small>OpenMagia adapts ffmpeg-skill’s typed plan-before-render and verification ideas to its own non-destructive timeline model; no ffmpeg-skill source is bundled. Full terms remain with the linked projects and model sources.</small></article>';
   $$('[data-model-tab]',body).forEach(tab=>tab.addEventListener('click',()=>{$$('[data-model-tab]',body).forEach(x=>x.classList.toggle('on',x===tab));$$('[data-model-pane]',body).forEach(x=>x.classList.toggle('on',x.dataset.modelPane===tab.dataset.modelTab));}));
   $$('[data-install-backend]',body).forEach(button=>button.addEventListener('click',()=>{const item=(management.catalog||[]).find(entry=>entry.id===button.dataset.installBackend);if(item)openModelLicense(item);}));
   $$('[data-uninstall-model]',body).forEach(button=>button.addEventListener('click',()=>openModelUninstall(button.dataset.uninstallModel,management)));
   $$('.loraRow',body).forEach(row=>{const id=row.dataset.lora;$('[data-remove-lora]',row).addEventListener('click',async()=>{if(!confirm('Remove this inactive LoRA file from OpenMagia?'))return;try{await api('/api/models/loras/'+id,{method:'DELETE'});toast('LoRA file removed','ok');renderSettings();}catch(error){toast(error.message,'err');}});});
   $$('[data-install-model]',body).forEach(button=>button.addEventListener('click',async()=>{const component=button.dataset.installModel;button.disabled=true;try{await api('/api/models/install',{method:'POST',body:{component,accepted_license:true}});toast('Installation started. Keep Settings open to monitor it.','ok');await refresh();renderSettings();}catch(err){button.disabled=false;toast(err.message,'err');}}));
   const scan=async()=>{const modelSelect=$('#detectedModelSelect'),roleSelect=$('#detectedModelRole'),useButton=$('#useSelectedModel'),meta=$('#detectedModelMeta');if(!modelSelect||!roleSelect||!useButton||!meta)return;modelSelect.disabled=true;roleSelect.disabled=true;useButton.disabled=true;modelSelect.innerHTML='<option>Scanning local models…</option>';meta.textContent='Looking through OpenMagia, LM Studio, MLX-LM, and known local caches…';try{const result=await api('/api/models/discover'),sources=result.sources||[];if(!sources.length){modelSelect.innerHTML='<option>No compatible models found</option>';meta.textContent='Start LM Studio or MLX-LM, or install an OpenMagia default below.';return;}const initial=Math.max(0,sources.findIndex(source=>source.active));modelSelect.innerHTML=sources.map((source,index)=>'<option value="'+index+'" '+(index===initial?'selected':'')+'>'+esc(source.name)+' · '+esc(source.provider)+'</option>').join('');modelSelect.disabled=false;const syncSelection=()=>{const source=sources[+modelSelect.value]||sources[0],roles=source.roles||[];roleSelect.innerHTML=roles.map(role=>'<option value="'+esc(role.id)+'" '+((source.active_role||roles[0]?.id)===role.id?'selected':'')+'>'+esc(role.label)+'</option>').join('')||'<option value="">Compatible role</option>';roleSelect.disabled=!roles.length;const location=source.path||source.endpoint||'';meta.innerHTML='<b>'+esc(source.kind==='h3'?'H3 video engine':source.kind==='formatter_file'?'GGUF refinement model':'Local model server')+'</b><span title="'+esc(location)+'">'+esc(location)+'</span>';const active=!!source.active&&(!source.active_role||source.active_role===roleSelect.value);useButton.disabled=active||!roles.length;useButton.textContent=active?'In use':'Use model';};modelSelect.addEventListener('change',syncSelection);roleSelect.addEventListener('change',syncSelection);useButton.addEventListener('click',async()=>{const source=sources[+modelSelect.value]||sources[0],role=roleSelect.value||'';useButton.disabled=true;try{await api('/api/models/select',{method:'POST',body:{kind:source.kind,path:source.path,endpoint:source.endpoint,model_id:source.id,role}});toast('Using '+source.name+' for '+((source.roles||[]).find(item=>item.id===role)?.label||'OpenMagia'),'ok');await refresh();renderSettings();}catch(error){useButton.disabled=false;toast(error.message,'err');}});syncSelection();}catch(error){modelSelect.innerHTML='<option>Scan unavailable</option>';meta.textContent=error.message;}};
-  $('#detectModels').addEventListener('click',scan);scan();
+  const musicInstallButton=$('#musicInstallBtn',body);
+  if(musicInstallButton)musicInstallButton.addEventListener('click',async()=>{try{await api('/api/models/install',{method:'POST',body:{component:'yue',accepted_license:true}});toast('YuE 2 installation started. Keep Settings open to monitor it.','ok');await refresh();renderSettings();}catch(error){toast(error.message,'err');}});
+  const musicCheckButton=$('#musicCheck',body);
+  if(musicCheckButton)musicCheckButton.addEventListener('click',async()=>{musicCheckButton.disabled=true;try{await api('/api/music/state');management=await api('/api/models/manage');await refresh();renderSettings();}catch(error){musicCheckButton.disabled=false;toast(error.message,'err');}});
+  const musicSave=$('#musicEndpointSave',body),musicLocal=$('#musicUseLocal',body),musicEndpointIn=$('#musicEndpoint',body),musicTokenIn=$('#musicToken',body);
+  if(musicEndpointIn)musicEndpointIn.value=musicSelection.mode==='endpoint'?(musicSelection.endpoint||''):'';
+  if(musicSave)musicSave.addEventListener('click',async()=>{try{await api('/api/models/select',{method:'POST',body:{kind:'yue_worker',endpoint:musicEndpointIn.value.trim(),token:musicTokenIn.value.trim(),role:'music_generation'}});toast('YuE 2 worker connected','ok');await refresh();renderSettings();}catch(error){toast(error.message,'err');}});
+  if(musicLocal)musicLocal.addEventListener('click',async()=>{try{await api('/api/models/select',{method:'POST',body:{kind:'yue_local',role:'music_generation'}});toast('Using the local YuE 2 runtime','ok');await refresh();renderSettings();}catch(error){toast(error.message,'err');}});
   updateModelInstallProgress();
 }
 function renderSideProjects() {
@@ -3754,6 +3926,7 @@ function kickAutoplay(root){
 }
 function skillPreviewMarkup(skill,variant='card'){
   if(skill.custom)return variant==='detail'?'<div class="skillStylePreview customSkillArt">✦</div>':'✦';
+  if(skill.type==='music')return variant==='detail'?'<div class="skillStylePreview musicSkillArt"><span>'+esc(skill.icon||'♫')+'</span><small>Music direction for YuE 2</small></div>':'<span class="musicSkillGlyph">'+esc(skill.icon||'♫')+'</span>';
   const id=esc(skill.id),controls=variant==='detail'?' controls':'';
   return '<span class="skillPreviewPair '+esc(variant)+'">'+
     '<video src="/assets/skill-previews/'+id+'.mp4" poster="/assets/skill-previews/'+id+'.jpg" muted loop autoplay playsinline'+controls+' preload="metadata"></video>'+
@@ -3786,7 +3959,7 @@ function renderSkillsCenter() {
     return (skillTypeFilter === 'all' || type === skillTypeFilter) && (skillFilter === 'all' || group === skillFilter) && (s.name + ' ' + s.description).toLowerCase().includes(q);
   });
   if (!skills.length) {
-    grid.innerHTML = '<div class="gempty"><div class="glyph">✣</div><h2>' + (skillTypeFilter === 'music' ? 'Music skills are coming next' : 'No matching skills') + '</h2><p>' + (skillTypeFilter === 'music' ? 'MiniMax Music skills will appear here when the music model is added to Generate.' : 'Try another type, scope, or search.') + '</p></div>';
+    grid.innerHTML = '<div class="gempty"><div class="glyph">' + (skillTypeFilter === 'music' ? '♫' : '✣') + '</div><h2>No matching skills</h2><p>' + (skillTypeFilter === 'music' ? 'Music skills write the lyric and the style contract, never the audio. Try another scope or search.' : 'Try another type, scope, or search.') + '</p></div>';
     return;
   }
   for (const s of skills) {
@@ -3811,12 +3984,13 @@ async function openSkillDetail(s, origin='skills-menu') {
   let specification='';
   if(s.projectStyle)specification=s.prompt||'';
   else if(s.custom) specification=s.specification||('# '+s.name+'\n\n'+s.description);
-  else try{const [response,contract]=await Promise.all([fetch('/skills/openmagia/'+encodeURIComponent(s.id)+'/SKILL.md',{cache:'no-store'}),fetch('/skills/openmagia/references/h3-production-contract.md',{cache:'no-store'})]);if(!response.ok||!contract.ok)throw new Error('Skill specification unavailable');specification=(await response.text())+'\n\n---\n\n## Linked H3 production contract\n\n'+(await contract.text());}catch(error){specification='This skill specification could not be loaded. OpenMagia will not substitute a different workflow.\n\n'+error.message;}
+  else try{const contractName=s.type==='music'?'music-production-contract.md':'h3-production-contract.md',contractTitle=s.type==='music'?'Linked music production contract':'Linked H3 production contract';const [response,contract]=await Promise.all([fetch('/skills/openmagia/'+encodeURIComponent(s.id)+'/SKILL.md',{cache:'no-store'}),fetch('/skills/openmagia/references/'+contractName,{cache:'no-store'})]);if(!response.ok||!contract.ok)throw new Error('Skill specification unavailable');specification=(await response.text())+'\n\n---\n\n## '+contractTitle+'\n\n'+(await contract.text());}catch(error){specification='This skill specification could not be loaded. OpenMagia will not substitute a different workflow.\n\n'+error.message;}
   if(request!==skillDetailRequest)return;
   body.innerHTML = '<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+'<h3>'+(s.projectStyle?'Continuity specification':'Complete skill specification')+'</h3><pre class="skillSpec"></pre></div><div class="skillSheetFoot">'+(s.projectStyle?'<button class="btn ghost danger" id="deleteProjectStyle">Delete</button>':'')+'<button class="btn primary" id="useSkillBtn">'+(s.projectStyle?'Use project style':'Use Skill')+'</button></div>';
   body.querySelector('.skillDetailDescription').textContent=s.description;body.querySelector('.skillSpec').textContent=specification;bindSkillPreviewFallback(body);kickAutoplay(body);
   body.querySelector('#useSkillBtn').addEventListener('click', async() => {
     if(s.projectStyle){const profile={name:s.name,prompt:s.prompt,skill_id:s.id,source:'continuity'};await api('/api/project',{method:'POST',body:{style_profile:profile,style_enabled:true}});state.style_profile=profile;state.style_enabled=true;state.base_prompt=s.prompt;closeSkillDetail();setHubView('editor');setInspectorTab('generate');renderGenerate();toast(s.name+' applied to new generations','ok');return;}
+    if(s.type==='music'){musicSkillId=s.id;closeSkillDetail();setHubView('editor');setInspectorTab('generate');$('#genType').value='music';applyGenerationType();renderMusicSkills();$('#musicPrompt').focus();toast(s.name+' selected for music','ok');return;}
     s.specification=specification;activePromptSkill=s;closeSkillDetail();setHubView('editor');setInspectorTab('generate');renderActivePromptSkill();$('#genPrompt').focus();toast(s.name+' attached to the prompt','ok');
   });
   const del=body.querySelector('#deleteProjectStyle');if(del)del.addEventListener('click',async()=>{if(!confirm('Delete this project style? New generations will stop using it if it is active.'))return;await api('/api/project/styles/'+encodeURIComponent(s.id),{method:'DELETE'});state.project_style_skills=(state.project_style_skills||[]).filter(x=>x.id!==s.id);if((state.style_profile||{}).skill_id===s.id){state.style_profile={name:'No project style',prompt:'',skill_id:null,source:'custom'};state.base_prompt='';}closeSkillDetail();renderSkillsCenter();toast('Project style deleted','ok');});
@@ -3941,6 +4115,8 @@ function bindEvents() {
   $('#timelineMagiaClose').addEventListener('click',closeTimelineMagia);$('#timelineMagiaCancel').addEventListener('click',closeTimelineMagia);$('#timelineMagiaScrim').addEventListener('click',closeTimelineMagia);
   $('#timelineMagiaRemix').addEventListener('click',()=>requestTimelineMagiaPlan(true,true));$('#timelineMagiaApply').addEventListener('click',applyTimelineMagia);
   $('#timelineMagiaScope').addEventListener('change',scheduleTimelineMagiaPlan);$('#timelineMagiaDirection').addEventListener('input',scheduleTimelineMagiaPlan);
+  $('#timelineMagiaExampleToggle').addEventListener('click',()=>{const panel=$('#timelineMagiaExamples');panel.hidden=!panel.hidden;$('#timelineMagiaExampleToggle').textContent=panel.hidden?'View recipe notes':'Hide recipe notes';});
+  $$('[data-magia-recipe]').forEach(button=>button.addEventListener('click',()=>selectTimelineMagiaRecipe(button.dataset.magiaRecipe)));
   $$('[data-timeline-magia-option]').forEach(input=>input.addEventListener('change',scheduleTimelineMagiaPlan));
   $('#undoBtn').addEventListener('click', undoTimeline);
   $('#freezeBtn').addEventListener('click', freezeAtPlayhead);

@@ -10,8 +10,10 @@ import server
 class SkillContractTests(unittest.TestCase):
     def test_catalog_is_filesystem_backed_and_complete(self):
         catalog = server.skill_catalog()
-        self.assertEqual(17, len(catalog))
+        self.assertEqual(20, len(catalog))
         self.assertEqual(len(catalog), len({item["id"] for item in catalog}))
+        music = {item["id"] for item in catalog if item.get("type") == "music"}
+        self.assertEqual({"song-director", "score-underscore", "album-identity"}, music)
         for item in catalog:
             self.assertTrue((server.SKILL_ROOT / item["id"] / "SKILL.md").is_file())
             self.assertTrue(item["instruction"].strip())

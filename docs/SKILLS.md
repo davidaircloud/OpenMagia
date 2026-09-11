@@ -10,6 +10,8 @@ Bundled skills live in `skills/openmagia/`:
 - `catalog.json` is the machine-readable catalog used by the UI and server.
 - `<skill-id>/SKILL.md` is the complete human-facing workflow and reference.
 - `references/h3-production-contract.md` documents the shared MiniMax H3 rules.
+- `references/music-production-contract.md` documents the shared YuE 2 rules
+  for the three music skills.
 
 The server refuses to publish a catalog entry when its matching `SKILL.md`,
 concise instruction, or machine contract is missing. The browser fetches this
@@ -34,6 +36,26 @@ scene idea *inside* that method:
 
 The full `SKILL.md` is shown in the skill detail sheet for people to read. It is
 never pasted wholesale into the small local model's context.
+
+## Music skills
+
+Three skills compose songs instead of shots. They are marked `"type": "music"` in
+the catalog, so the Skill Center's ♫ filter, the Generate → Music skill row, and
+`/api/scenes` validation all agree about which workflows may touch a song.
+
+| Skill | What it produces |
+|---|---|
+| `song-director` | A brief becomes a singable lyric with section tags, plus the style sentence that carries genre, instruments, vocal character, language and tempo. |
+| `score-underscore` | An instrumental cue for a picture beat, written with an ABC motif when the length or mode has to be controlled. |
+| `album-identity` | A track that keeps a shared record identity: recurring key, instrumentation and phrasing described in the style sentence. |
+
+Music skills write words, never audio. YuE 2 accepts a style description, lyrics, a
+planning mode, an optional ABC score and a seed — and nothing else. So these skills
+put tempo, key and meter into prose (the model has no BPM or key argument), keep
+`[Verse]`-style section tags intact, and never invent a duration. A shot-writing
+skill cannot be attached to a music scene; the server refuses rather than letting a
+story formula rewrite a lyric into scene directions. See
+`references/music-production-contract.md` for the full contract.
 
 ## Other reusable guidance
 

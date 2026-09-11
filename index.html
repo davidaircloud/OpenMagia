@@ -149,8 +149,41 @@
         </div>
       </section>
       </div>
+
+      <!-- Music scene. YuE 2 is a song composer, not a clip renderer: it takes the
+           style description, the words, how to plan them, an optional score and a
+           seed. There is deliberately no length, tempo, key, reference-audio or
+           negative-prompt field here, because the model has no such argument. -->
+      <div id="musicGenerationControls" hidden>
+        <section class="projectStyleCard">
+          <div class="projectStyleTop"><div><h3>Song direction</h3><small id="musicRuntimeHint">YuE 2 composer</small></div></div>
+          <textarea class="txt" id="musicPrompt" placeholder="Describe the song: genre, instruments, vocal character, language, intended tempo…"></textarea>
+          <div class="styleComposerBar"><button id="musicRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
+        </section>
+        <section class="h3Composer">
+          <div class="musicSkills" id="musicSkills" role="radiogroup" aria-label="Song skill"></div>
+          <label class="fld musicLyricsField"><span>Lyrics</span>
+            <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
+            <small>Section tags such as <code>[Verse]</code> or <code>[Chorus]</code> are kept; the model is trained on them. Lyrics are sent exactly as written — only Markdown headings and production notes are taken out, and the review sheet lists what was.</small>
+          </label>
+          <div class="generationGrid musicGrid">
+            <div class="field"><label>Structure <span class="info" tabindex="0" role="img" aria-label="About song planning" data-tooltip="Full plan writes an ABC score before the audio and follows it. Melody plans a shorter score. Off goes straight to audio; with no words and no score it is the only mode that can end.">i</span></label>
+              <select class="txt" id="musicPlan"><option value="full" selected>Full plan · score first</option><option value="melody">Melody only</option><option value="off">Off · straight to audio</option></select></div>
+            <div class="field"><label>Voice <span class="info" tabindex="0" role="img" aria-label="About the vocal" data-tooltip="YuE 2 has no instrumental mode. This writes an [Instrumental] section and asks for an arrangement with no lead vocal — a style direction, not a switch. Sung words always win.">i</span></label>
+              <select class="txt" id="musicVocal"><option value="lead" selected>Lead vocal</option><option value="instrumental">No lead vocal</option></select></div>
+            <div class="field"><label>Seed <span class="info" tabindex="0" role="img" aria-label="About the seed" data-tooltip="Same description, lyrics and seed reproduce the same take. New seed, new arrangement.">i</span></label>
+              <div class="slider-row"><input class="txt" type="number" id="musicSeed" value="4242" min="0" step="1" inputmode="numeric"><button id="musicRandom" class="btn ghost sm" title="New seed, same song">Random</button></div></div>
+          </div>
+          <label class="fld"><span>ABC score <em>(optional — a motif to develop)</em></span>
+            <textarea class="txt" id="musicAbc" rows="3" spellcheck="false" placeholder="X:1&#10;Q:1/4=92&#10;K:Dm&#10;|: d2 f2 e2 c2 :|"></textarea>
+            <small>Also where a real melody belongs: cover a tune, keep a theme from your project, or fix the mode a no-words piece would otherwise wander in.</small>
+          </label>
+          <div id="musicCompile" class="musicCompile" aria-live="polite"></div>
+          <div class="composerBar"><button id="musicManageBtn" class="composerTool">▣ YuE 2 runtime</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>
+        </section>
       </div>
       <div class="generateFooter"><button id="genBtn" class="generatePrimary" type="button"><span>Generate scene</span><span aria-hidden="true">→</span></button></div>
+      </div>
     </div>
 
     <!-- cast -->
@@ -196,17 +229,27 @@
   <aside class="sheetPanel timelineMagiaPanel" role="dialog" aria-modal="true" aria-labelledby="timelineMagiaTitle">
     <div class="sheetHead"><div><h2 id="timelineMagiaTitle">Magia</h2><p>Polish the timeline with editable effects.</p></div><button id="timelineMagiaClose" class="sheetClose" aria-label="Close">×</button></div>
     <div class="sheetPanelBody timelineMagiaBody">
+      <section class="timelineMagiaRecipes"><div class="timelineMagiaRecipeHead"><span><strong>Editing recipe</strong><small>Replaces previous preset settings in the chosen scope. Unchecked types restore their pre-preset values.</small></span><button id="timelineMagiaExampleToggle" type="button">View recipe notes</button></div><div id="timelineMagiaRecipeList" class="timelineMagiaRecipeList">
+        <button data-magia-recipe="subtle" class="on">Subtle</button><button data-magia-recipe="narrative">Narrative</button><button data-magia-recipe="social">Social</button><button data-magia-recipe="cinematic">Cinematic</button><button data-magia-recipe="audio-first">Audio-first</button>
+      </div><p id="timelineMagiaApplied" class="timelineMagiaApplied" hidden></p></section>
       <label>Direction<textarea id="timelineMagiaDirection" class="txt" placeholder="Optional mood, rhythm, or editing direction…"></textarea></label>
       <label>Apply to<select id="timelineMagiaScope" class="txt"><option value="timeline">Entire timeline</option><option value="selected">Selected clip</option></select></label>
-      <div class="timelineMagiaSkills" aria-label="Editing skills">
+      <div class="timelineMagiaSkillGroup"><h3>Picture</h3><div class="timelineMagiaSkills" aria-label="Picture editing skills">
         <label><input type="checkbox" data-timeline-magia-option="transitions" checked><span><strong>Transitions</strong><small>Blend compatible clip edges.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="transforms" checked><span><strong>Motion</strong><small>Compose zoom and position.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="transforms" checked><span><strong>Motion & reframing</strong><small>Compose zoom, drift, and position.</small></span></label>
         <label><input type="checkbox" data-timeline-magia-option="color" checked><span><strong>Color</strong><small>Balance clips into one look.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="pacing" checked><span><strong>Pacing</strong><small>Tighten and resequence safely.</small></span></label>
         <label><input type="checkbox" data-timeline-magia-option="overlays" checked><span><strong>Overlays</strong><small>Place and soften overlay clips.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="audio" checked><span><strong>Audio</strong><small>Add short edge fades.</small></span></label>
-      </div>
+      </div></div>
+      <div class="timelineMagiaSkillGroup"><h3>Rhythm</h3><div class="timelineMagiaSkills oneColumn" aria-label="Rhythm editing skills">
+        <label><input type="checkbox" data-timeline-magia-option="pacing" checked><span><strong>Pacing</strong><small>Tighten gaps and preserve legal clip timing.</small></span></label>
+      </div></div>
+      <div class="timelineMagiaSkillGroup"><h3>Sound</h3><div class="timelineMagiaSkills" aria-label="Sound editing skills">
+        <label><input type="checkbox" data-timeline-magia-option="audio" checked><span><strong>Edge fades</strong><small>Smooth audio at clip boundaries.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="audio_cleanup" checked><span><strong>Voice cleanup</strong><small>Reduce steady noise and control speech dynamics.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="loudness" checked><span><strong>Loudness</strong><small>Target consistent programme level and safe peaks.</small></span></label>
+      </div></div>
       <div id="timelineMagiaPlan" class="timelineMagiaPlan" aria-live="polite"></div>
+      <section id="timelineMagiaExamples" class="timelineMagiaExamples" hidden></section>
     </div>
     <div class="sheetFoot timelineMagiaFoot"><button id="timelineMagiaCancel" class="btn ghost">Cancel</button><button id="timelineMagiaRemix" class="btn ghost">Remix</button><button id="timelineMagiaApply" class="btn primary">Apply effects</button></div>
   </aside>

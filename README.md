@@ -73,6 +73,7 @@ Trim, split, freeze, layer, detach audio, and arrange clips on a multi-track tim
 - **Manage assets once** across projects, including generated media, imported footage, character references, frozen frames, and audio.
 - **Edit non-destructively** with clip-level transforms, color, masks, effects, transitions, overlays, and audio controls.
 - **Export honestly** through FFmpeg using the same layout and transition intent shown by the preview.
+- **Compose songs, not just clips** with YuE 2: a style description and your lyrics become a finished stereo song on the audio track, with the ABC score it planned from kept as a reviewable artefact.
 - **Extend locally** with permissioned plugins and reusable prompt skills.
 
 ## Install
@@ -90,6 +91,19 @@ Native generation currently targets:
 
 The editor launches on macOS, Linux, and Windows, but OpenMagia only advertises generation backends it can install and execute end to end. CUDA and lower-memory backends are welcome contributions; they will appear in Settings once they meet that bar.
 
+### Music generation (optional)
+
+Songs come from [YuE 2](https://github.com/multimodal-art-projection/YuE) (m-a-p/YuE2-3B). Install it with `./install.sh --with-yue` or from **Settings → Music**.
+
+| | Requirement |
+|---|---|
+| Computer | Apple Silicon Mac (Metal/MPS), Linux with NVIDIA, or any machine with enough RAM for CPU |
+| Memory | 24 GB+ comfortable; measured on a 32 GB Apple Silicon Mac |
+| Storage | 7.3 GB model + 0.53 GB VAE (CC BY-NC 4.0, no gated acceptance) |
+| Measured | 43.5 s of finished audio in 140 s wall on MPS, `torch-eager` |
+
+Upstream validates YuE 2 on Linux · NVIDIA · 24 GB. OpenMagia measured the Apple Silicon path itself rather than inheriting that claim; the numbers live in [the music design record](docs/YUE_MUSIC_INTEGRATION.md). A song has **no length, tempo, key, reference-audio, or negative-prompt control**, because the model exposes none — tempo and key belong in the style sentence, and YuE 2 decides how long the result is.
+
 ```bash
 git clone https://github.com/davidaircloud/OpenMagia.git
 cd OpenMagia
@@ -103,7 +117,9 @@ Already have H3 or its checkpoints? Point `config.json` to them instead of downl
 
 ## How it stays local
 
-OpenMagia is a small Python server and a browser-based editing interface. The server coordinates native H3 generation, local prompt refinement, media analysis, project storage, and FFmpeg export. The browser supplies the visual workspace. No hosted account or remote project database is required.
+OpenMagia is a small Python server and a browser-based editing interface. The server coordinates native H3 generation, local song composition, local prompt refinement, media analysis, project storage, and FFmpeg export. The browser supplies the visual workspace. No hosted account or remote project database is required.
+
+The music runtime is the one component you may move off the machine: `yue_worker.py` is the same protocol OpenMagia runs locally, so a shared GPU box can render songs while your project, timeline, and media stay local.
 
 For continuity details, see [Continuity prompting](docs/CONTINUITY_PROMPTING.md). For reusable workflows, see [Prompt skills](docs/SKILLS.md). For extensions, see [Plugin development](docs/PLUGINS.md).
 
@@ -121,7 +137,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md), follow the [Code of Conduct](CODE_OF_CO
 
 ## Built with
 
-[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · Qwen2.5
+[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [YuE 2](https://github.com/multimodal-art-projection/YuE) by m-a-p · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · Qwen2.5
 
 The Character Creator approach was inspired by [PoopMan333's H3 Character Sheet Generator](https://huggingface.co/PoopMan333/H3_Character_Sheet_Generator). OpenMagia is independent and is not affiliated with or endorsed by MiniMax or the projects above. Full attribution and component licenses are in [NOTICE.md](NOTICE.md).
 

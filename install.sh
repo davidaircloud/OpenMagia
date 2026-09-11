@@ -32,6 +32,14 @@ BUILD_VENV="${BUILD_VENV:-$SCRIPT_DIR/addons/build-tools}"
 CMAKE_COMMAND=""
 FFMPEG_VENV="${FFMPEG_VENV:-$SCRIPT_DIR/addons/ffmpeg/runtime}"
 FFMPEG_BIN_DIR="${FFMPEG_BIN_DIR:-$SCRIPT_DIR/addons/ffmpeg/bin}"
+# YuE 2 (music) is opt-in: it needs Linux + an NVIDIA GPU with BF16 support.
+WANT_YUE=0
+WANT_YUE_WEIGHTS=1
+YUE_DIR="${YUE_DIR:-$SCRIPT_DIR/addons/yue}"
+YUE_SRC_DIR="${YUE_SRC_DIR:-$YUE_DIR/YuE}"
+YUE_VENV="${YUE_VENV:-$YUE_DIR/runtime}"
+YUE_MODEL="${YUE_MODEL:-m-a-p/YuE2-3B}"
+YUE_VAE="${YUE_VAE:-m-a-p/YuE2-Vae}"
 
 usage() {
   cat <<USAGE
@@ -43,6 +51,9 @@ OpenMagia installer
   --no-formatter  skip the ~1 GB local prompt formatter and llama.cpp runtime
   --no-models     skip MiniMax H3 checkpoint downloads
   --no-h3         skip downloading and building the H3 engine
+  --with-yue      install the YuE 2 music runtime (Apple Silicon MPS or NVIDIA;
+                  ~8 GB of weights; --no-yue-weights skips the download)
+  --no-yue-weights  with --with-yue, install the runtime but fetch no checkpoint
   -h         this help
 USAGE
 }
@@ -56,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --no-formatter) WANT_FORMATTER=0; shift;;
     --no-models) WANT_MODELS=0; shift;;
     --no-h3) WANT_H3=0; shift;;
+    --with-yue) WANT_YUE=1; shift;;
+    --no-yue-weights) WANT_YUE_WEIGHTS=0; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown arg: $1"; usage; exit 1;;
   esac
@@ -239,6 +252,69 @@ if [[ "$WANT_MODELS" -eq 1 && "$WANT_REF2VA" -eq 1 && "$ref2va_ok" -eq 0 ]]; the
   [[ "$ref2va_ok" -eq 1 ]] && log "Ref2VA checkpoint ready" || { err "Ref2VA download incomplete"; exit 1; }
 elif [[ "$ref2va_ok" -eq 1 ]]; then
   log "Ref2VA checkpoint present"
+fi
+
+# --- 5. YuE 2 music runtime (opt-in) ----------------------------------------
+# Upstream validates Linux + NVIDIA + 24 GB, and the runtime itself resolves
+# cuda -> mps -> cpu, so this also installs on Apple Silicon (measured: MPS,
+# torch-eager, 23-26 semantic tokens/s). Weights are 7.3 GB + 0.53 GB and resolve
+# from the Hugging Face cache; downloading them here is a warm-up, not a move.
+if [[ "$WANT_YUE" -eq 0 ]]; then
+  log "skipping the YuE 2 music runtime (add --with-yue to make music here)"
+else
+  have git || { err "git is required to install the YuE 2 runtime"; exit 1; }
+  if [[ ! -f "$YUE_SRC_DIR/pyproject.toml" ]]; then
+    log "downloading the YuE 2 runtime ..."
+    git clone --depth 1 https://github.com/multimodal-art-projection/YuE.git "$YUE_SRC_DIR"
+  fi
+  if [[ ! -x "$YUE_VENV/bin/python" ]]; then
+    # The upstream quickstart uses 3.12; anything 3.10+ imports fine.
+    if have uv; then
+      log "creating the YuE 2 environment with uv ..."
+      uv venv --python 3.12 "$YUE_VENV"
+    else
+      YUE_PYTHON=""
+      for candidate in python3.12 python3.11 python3.10 python3; do
+        if have "$candidate" && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+          YUE_PYTHON="$candidate"; break
+        fi
+      done
+      [[ -n "$YUE_PYTHON" ]] || { err "YuE 2 needs CPython 3.10+ (3.12 recommended), or install uv"; exit 1; }
+      log "creating the YuE 2 environment with $YUE_PYTHON ..."
+      "$YUE_PYTHON" -m venv "$YUE_VENV"
+    fi
+  fi
+  if [[ ! -x "$YUE_VENV/bin/yue2" ]]; then
+    log "installing the YuE 2 runtime (torch + transformers, a few GB) ..."
+    if have uv; then
+      uv pip install --python "$YUE_VENV/bin/python" "$YUE_SRC_DIR"
+    else
+      "$YUE_VENV/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+      "$YUE_VENV/bin/python" -m pip install --disable-pip-version-check "$YUE_SRC_DIR"
+    fi
+  else
+    log "YuE 2 runtime present: $YUE_VENV/bin/yue2"
+  fi
+  [[ -x "$YUE_VENV/bin/yue2" ]] || { err "YuE 2 installation did not provide the yue2 CLI"; exit 1; }
+  # Ask the runtime, never guess: this prints the device the machine really has.
+  YUE_DOCTOR="$("$YUE_VENV/bin/yue2" doctor --device auto 2>/dev/null || true)"
+  if printf '%s' "$YUE_DOCTOR" | grep -q '"name"'; then YUE_DEVICE="cuda (see yue2 doctor)"
+  elif printf '%s' "$YUE_DOCTOR" | grep -q '"mps_available": true'; then YUE_DEVICE="mps (Apple Silicon)"
+  elif printf '%s' "$YUE_DOCTOR" | grep -q '"torch"'; then YUE_DEVICE="cpu"
+  else YUE_DEVICE=""; fi
+  [[ -n "$YUE_DEVICE" ]] || warn "YuE 2 doctor reported no usable device; the runtime will still try cuda -> mps -> cpu"
+  [[ -n "$YUE_DEVICE" ]] && log "YuE 2 will run on: $YUE_DEVICE"
+  if [[ "$WANT_YUE_WEIGHTS" -eq 1 ]]; then
+    log "downloading the $YUE_MODEL song model (~7.3 GB) ..."
+    hf_download "$YUE_MODEL" || warn "$YUE_MODEL download incomplete; the runtime fetches it on first use"
+    log "downloading the $YUE_VAE decoder (~0.53 GB) ..."
+    hf_download "$YUE_VAE" || warn "$YUE_VAE download incomplete; the runtime fetches it on first use"
+  else
+    log "skipping YuE 2 weights (--with-yue fetches them unless --no-yue-weights is given)"
+  fi
+  log "Music is ready to use from OpenMagia: Settings > Models selects this runtime,"
+  log "and the app starts the worker itself. To serve songs from another machine instead:"
+  log "  YUE_WORKER_TOKEN=\"pick-a-secret\" $YUE_VENV/bin/python \"$SCRIPT_DIR/yue_worker.py\" --host 0.0.0.0"
 fi
 
 echo

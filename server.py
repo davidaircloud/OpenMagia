@@ -5,8 +5,9 @@ Serves the UI, manages a media library and a multi-track timeline, runs h3
 generation (which feeds clips into the base track), and exports the timeline
 to a single MP4 via the NLE compositor (nle.py).
 """
-import json
+import atexit
 import hashlib
+import json
 import math
 import os
 import platform
@@ -20,6 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.error
 import urllib.parse
 import urllib.request
 from types import SimpleNamespace
@@ -48,6 +50,7 @@ def physical_memory_gb():
 SYSTEM_MEMORY_GB = physical_memory_gb()
 
 import nle
+import yue_prompts
 from h3_prompts import (FPS, MAX_FRAMES, MAX_REFERENCES, PRESETS, SHEET_RECIPES,
                         SHEET_STYLES, analyze_cut_timeline, count_references, duration_for_frames,
                         format_prompt, format_image_prompt, format_sheet_prompt, get_sheet_recipe,
@@ -134,7 +137,15 @@ MODEL_BACKENDS = [
     {"id":"h3-metal", "name":"MiniMax H3 · Metal", "provider":"h3.c", "platforms":["darwin-arm64"],
      "memory_min":64, "disk_gb":278, "stability":"stable", "install_component":"h3",
      "summary":"Native Apple Silicon generation with text, first/last-frame, and ordered references.",
-     "source":"https://github.com/antirez/h3.c", "supports":["t2va","fl2va","ref2va","audio-references"]},
+     "source":"https://github.com/antirez/h3.c", "supports":["t2va","fl2va","ref2va","audio-references"],
+     "media":"video", "role":"video_generation"},
+    {"id":"yue2", "name":"YuE 2 · music", "provider":"m-a-p", "platforms":["darwin-arm64","darwin","linux","win32"],
+     "memory_min":16, "disk_gb":12, "stability":"stable", "install_component":"yue",
+     "media":"music", "role":"music_generation",
+     "summary":"Full songs with sung lyrics, instrumental cues, and a symbolic ABC score you can inspect.",
+     "source":"https://github.com/multimodal-art-projection/YuE",
+     "supports":["lyrics","instrumental","style-tags","abc-score","seed"],
+     "sizes_gb":[7.3, 0.53]},
 ]
 
 def _load_model_registry():
@@ -169,6 +180,326 @@ def hardware_profile():
             "memory_gb":SYSTEM_MEMORY_GB, "gpu":gpu, "vram_gb":vram, "gpu_driver":cuda,
             "disk_free_gb":round(shutil.disk_usage(ROOT).free / (1024 ** 3), 1)}
 
+# --- music generation (YuE 2) -------------------------------------------------
+# YuE 2 runs here: the managed runtime under addons/yue answers on MPS, and a
+# yue_worker.py on a CUDA box is the same contract over the network. Both are
+# reached through one worker protocol, so a song never depends on which one the
+# artist chose. Nothing here may advertise a music runtime OpenMagia cannot
+# actually execute end to end - the device string always comes from the runtime.
+YUE_MODEL = yue_prompts.YUE_MODEL_ID
+YUE_VAE = yue_prompts.YUE_VAE_ID
+YUE_LOCAL_DIR = ROOT / "addons" / "yue"
+YUE_LOCAL_VENV = YUE_LOCAL_DIR / "runtime"
+YUE_WORKER_VERSION = "1"
+MUSIC_TIMEOUT = float(os.environ.get("OPENMAGIA_MUSIC_TIMEOUT", "20"))
+MUSIC_STALL_TIMEOUT = int(os.environ.get("OPENMAGIA_MUSIC_STALL_TIMEOUT", "900"))
+MUSIC_POLL_SECONDS = 2.0
+MUSIC_HEALTH_TTL = 20.0
+MUSIC_HEALTH_CACHE = {}   # target -> (monotonic_time, payload)
+MUSIC_LOCAL_PORT = int(os.environ.get("OPENMAGIA_MUSIC_PORT", "8931"))
+MUSIC_WORKER_DIR = DATA / "music"
+MUSIC_LOCAL_BOOT = float(os.environ.get("OPENMAGIA_MUSIC_BOOT", "120"))
+MUSIC_BACKENDS = ("torch-eager", "torch", "vllm")
+_music_worker = {"proc": None, "log": None}
+MUSIC_LOCAL_PROBE = {"running": False}
+
+
+def yue_endpoint_target():
+    """Configured worker URL, or "" when the managed local runtime is selected."""
+    value = str(_saved_model_sources.get("yue_endpoint") or "").strip().rstrip("/")
+    return value if value.lower().startswith(("http://", "https://")) else ""
+
+
+def yue_endpoint_token():
+    return str(_saved_model_sources.get("yue_token") or "").strip()
+
+
+def yue_local_runtime():
+    """The managed YuE 2 install on this machine, if `install.sh --with-yue` made one.
+
+    No CUDA assumption: YuE 2 resolves cuda -> mps -> cpu by itself, and the device
+    reported here is the one `yue2 doctor` measured, not one this file guesses.
+    """
+    executable = YUE_LOCAL_VENV / "bin" / "yue2"
+    installed = executable.exists()
+    hf = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+    def cached(repo):
+        snapshots = hf / ("models--" + repo.replace("/", "--")) / "snapshots"
+        return bool(snapshots.is_dir() and any((p / "config.json").is_file() and
+                    any(p.glob("*.safetensors")) for p in snapshots.iterdir() if p.is_dir()))
+    weights = {"model": cached(YUE_MODEL), "vae": cached(YUE_VAE)}
+    complete = installed and all(weights.values())
+    missing = ([] if installed else ["runtime"]) + [name for name, ok in weights.items() if not ok]
+    return {"present": installed, "installed": installed, "ready": complete,
+            "reason": "" if complete else ("missing " + ", ".join(missing)), "missing": missing,
+            "weights": weights, "cli": str(executable),
+            "python": str(YUE_LOCAL_VENV / "bin" / "python"), "device": yue_local_device() if installed else ""}
+
+
+def yue_local_device(refresh=False):
+    """Ask the runtime which device it will use. Cached, and never blocking.
+
+    `yue2 doctor` imports torch, which takes seconds - far too long to do inside a
+    state request. The first caller gets "" and a background probe; the label
+    appears as soon as the runtime has measured the machine.
+    """
+    key = "local-doctor"
+    now = time.monotonic()
+    hit = MUSIC_HEALTH_CACHE.get(key)
+    if hit and not refresh and now - hit[0] < 600:
+        return hit[1].get("device", "")
+    if not refresh:
+        if not (hit and MUSIC_LOCAL_PROBE.get("running")):
+            MUSIC_HEALTH_CACHE[key] = (hit[0] if hit else now, dict(hit[1]) if hit else {})
+            threading.Thread(target=yue_local_device, kwargs={"refresh": True}, daemon=True).start()
+        return (hit[1].get("device", "") if hit else "")
+    cli = YUE_LOCAL_VENV / "bin" / "yue2"
+    payload = {"device": "", "ready": False}
+    MUSIC_LOCAL_PROBE["running"] = True
+    try:
+        run = subprocess.run([str(cli), "doctor", "--device", "auto"], cwd=str(ROOT),
+                             capture_output=True, text=True, timeout=120)
+        text = run.stdout or ""
+        report = json.loads(text[text.index("{"):] if "{" in text else "{}")
+        cuda = report.get("cuda") or []
+        first = cuda[0] if cuda and isinstance(cuda[0], dict) else {}
+        if cuda:
+            payload["device"] = "cuda · " + str(first.get("name") or "NVIDIA GPU")
+        elif report.get("mps_available"):
+            payload["device"] = "mps (Apple Silicon)"
+        elif report.get("torch") or (report.get("versions") or {}).get("torch"):
+            payload["device"] = "cpu"
+        payload["ready"] = bool(report.get("dependencies_ready"))
+    except Exception:
+        pass
+    finally:
+        MUSIC_LOCAL_PROBE["running"] = False
+    MUSIC_HEALTH_CACHE[key] = (time.monotonic(), payload)
+    return payload["device"]
+
+
+def cuda_available():
+    """Local CUDA truth only; a remote worker reports its own device instead."""
+    hardware = hardware_profile()
+    if hardware["gpu"] and hardware["vram_gb"]:
+        return True
+    return bool(shutil.which("nvidia-smi"))
+
+
+def music_health_payload(url, token="", timeout=MUSIC_TIMEOUT):
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme.startswith("http") or not parsed.netloc:
+        return {"ok": False, "error": "Music worker address must start with http:// or https://"}
+    request = urllib.request.Request(url.rstrip("/") + "/health", method="GET")
+    request.add_header("Accept", "application/json")
+    if token:
+        request.add_header("X-Yue-Token", token)
+    try:
+        with urllib.request.urlopen(request, timeout=max(3.0, min(timeout, 25.0))) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return {"ok": False, "error": f"Music worker unreachable: {type(exc).__name__}: {reason}"}
+    except Exception as exc:
+        return {"ok": False, "error": f"Music worker responded badly: {type(exc).__name__}: {exc}"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "Music worker returned an unexpected health response"}
+    payload["ok"] = bool(payload.get("ok", True))
+    return payload
+
+
+def music_health_cached(url, token="", force=False):
+    """Endpoint truth is cached on purpose: state rendering must never block."""
+    now = time.monotonic()
+    hit = MUSIC_HEALTH_CACHE.get(url)
+    if hit and not force and now - hit[0] < MUSIC_HEALTH_TTL:
+        payload = dict(hit[1])
+        payload["cached"] = True
+        return payload
+    payload = music_health_payload(url, token, timeout=4.0)
+    MUSIC_HEALTH_CACHE[url] = (now, payload)
+    return payload
+
+
+def yue_selection():
+    """Which music source the user chose. A configured endpoint wins over a local install."""
+    endpoint = yue_endpoint_target()
+    if endpoint:
+        return {"mode": "endpoint", "endpoint": endpoint, "label": endpoint.replace("//", "// ")}
+    local = yue_local_runtime()
+    if local["present"]:
+        return {"mode": "local", "endpoint": "",
+                "label": "This machine · " + (local["device"] or "managed YuE 2 runtime")}
+    return {"mode": "none", "endpoint": "", "label": "No music runtime selected"}
+
+
+def music_endpoint():
+    """Where music jobs go. Both runtimes speak the same worker protocol.
+
+    The managed local install is served by a `yue_worker.py` child on loopback, so
+    a local song and a song on a CUDA box travel the same code path here.
+    """
+    endpoint = yue_endpoint_target()
+    if endpoint:
+        return {"mode": "endpoint", "url": endpoint, "token": yue_endpoint_token()}
+    if yue_local_runtime()["present"]:
+        return {"mode": "local", "url": f"http://127.0.0.1:{MUSIC_LOCAL_PORT}", "token": ""}
+    return {"mode": "none", "url": "", "token": ""}
+
+
+def music_worker_health(url, token="", timeout=4.0):
+    return music_health_payload(url, token, timeout=timeout)
+
+
+def ensure_local_worker(wait=MUSIC_LOCAL_BOOT):
+    """Start the managed local worker when nothing already answers on its port.
+
+    Returns the health payload. Booting is slow on purpose: the first call imports
+    torch, and the progress the user sees afterwards is the runtime's own.
+    """
+    url = f"http://127.0.0.1:{MUSIC_LOCAL_PORT}"
+    proc = _music_worker.get("proc")
+    if proc and proc.poll() is not None:
+        _music_worker["proc"] = None
+    if not proc:
+        health = music_worker_health(url, timeout=2.0)
+        if health.get("ok"):
+            return health
+    if not proc:
+        runtime = yue_local_runtime()
+        if not runtime["present"]:
+            raise ValueError("Install the music runtime first: Settings · Models · YuE 2")
+        MUSIC_WORKER_DIR.mkdir(parents=True, exist_ok=True)
+        source = YUE_LOCAL_DIR / "YuE"
+        log_path = MUSIC_WORKER_DIR / "worker.log"
+        command = [runtime["python"], str(ROOT / "yue_worker.py"),
+                   "--host", "127.0.0.1", "--port", str(MUSIC_LOCAL_PORT),
+                   "--workdir", str(MUSIC_WORKER_DIR), "--cwd", str(source if source.is_dir() else ROOT),
+                   "--yue-cli", runtime["cli"], "--device", "auto", "--backend", "torch-eager"]
+        log = open(log_path, "ab", buffering=0)
+        try:
+            _music_worker["log"] = log
+            _music_worker["proc"] = subprocess.Popen(command, cwd=str(ROOT), stdout=log, stderr=log,
+                                     stdin=subprocess.DEVNULL, start_new_session=True)
+            atexit.register(stop_local_worker)
+        except OSError as exc:
+            raise ValueError("Could not start the music runtime: " + str(exc)) from exc
+    deadline = time.monotonic() + max(10.0, float(wait))
+    last = {}
+    while time.monotonic() < deadline:
+        last = music_worker_health(url, timeout=3.0)
+        if last.get("ok") and last.get("ready"):
+            return last
+        if _music_worker.get("proc") and _music_worker["proc"].poll() is not None:
+            break
+        time.sleep(2.0)
+    stop_local_worker()
+    raise ValueError("The music runtime did not become ready: " +
+                     str(last.get("error") or "see data/music/worker.log"))
+
+
+def stop_local_worker():
+    proc = _music_worker.get("proc")
+    log = _music_worker.get("log")
+    _music_worker["proc"] = None
+    if proc and proc.poll() is None:
+        try:
+            if os.name != "nt":
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                proc.terminate()
+            proc.wait(timeout=15)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if log:
+        try:
+            log.close()
+        except Exception:
+            pass
+    _music_worker["log"] = None
+
+
+def yue_music_state(force=False):
+    """The Settings > Music block. Cheap and cached: never reaches the network here."""
+    selection = yue_selection()
+    local = yue_local_runtime()
+    hardware = hardware_profile()
+    out = {"model": YUE_MODEL, "vae": YUE_VAE, "selection": selection, "local": local,
+           "sources": [], "limits": {"max_style_chars": yue_prompts.MAX_STYLE_CHARS,
+                                     "max_lyrics_chars": yue_prompts.MAX_LYRICS_CHARS,
+                                     "max_abc_chars": yue_prompts.MAX_ABC_CHARS},
+           "unsupported": ["a duration or length control", "BPM, key or meter as separate controls",
+                           "reference audio or voice cloning", "negative prompts", "stems",
+                           "partial audio from a stopped song"],
+           "device": local["device"], "health": None}
+    endpoint = selection["endpoint"]
+    if endpoint:
+        health = music_health_cached(endpoint, yue_endpoint_token(), force=force)
+        out["health"] = health
+        out["ready"] = bool(health.get("ok")) and bool(health.get("ready", True))
+        if health.get("ok"):
+            out["sources"].append({"id": "endpoint", "kind": "endpoint", "path": endpoint,
+                                   "label": f"{health.get('device') or 'YuE 2'} \u00b7 {endpoint}",
+                                   "role": "music_generation", "healthy": True,
+                                   "detail": "YuE 2 worker" + (" (cached)" if health.get("cached") else "")})
+    else:
+        out["ready"] = bool(local["ready"])
+    if local["present"] or selection["mode"] != "endpoint":
+        out["sources"].append({"id": "local", "kind": "local", "path": str(YUE_LOCAL_DIR),
+                               "label": "Managed local runtime" + ("" if local["present"] else f" ({local['reason']})"),
+                               "role": "music_generation", "healthy": bool(local["ready"]),
+                               "detail": (local["device"] or "device reported at first start") +
+                                         " \u00b7 7.3 GB model + 0.53 GB decoder"})
+    out["cuda"] = cuda_available()
+    out["reason"] = "" if out["ready"] else (
+        (out["health"] or {}).get("error") if endpoint else
+        (("YuE 2 is installed but " + local["reason"]) if local["present"] else
+         "No music runtime yet \u2014 install YuE 2 in Settings, or connect a YuE 2 worker"))
+    return out
+
+
+def yue_worker_call(path, method="GET", body=None, timeout=None):
+    """One HTTP call to the music runtime, with OpenMagia-shaped errors.
+
+    A managed local install is started on demand, so generating a song is one
+    action for the artist instead of a ceremony in a terminal.
+    """
+    target = music_endpoint()
+    if target["mode"] == "none":
+        raise ValueError("No music runtime yet: install YuE 2 or connect a YuE 2 worker")
+    if target["mode"] == "local" and path.startswith("/v1/music") and method == "POST":
+        ensure_local_worker()
+    endpoint, token = target["url"], target["token"]
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(endpoint + path, data=data, method=method)
+    request.add_header("Accept", "application/json")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    if token:
+        request.add_header("X-Yue-Token", token)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout or MUSIC_TIMEOUT) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = str(json.loads(exc.read().decode("utf-8", errors="replace")).get("error") or "")
+        except Exception:
+            detail = (exc.read() if exc.fp else b"").decode("utf-8", errors="replace")[:200]
+        raise ValueError(f"Music worker said {exc.code}: {detail or exc.reason}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise ValueError(f"Music worker unreachable: {getattr(exc, 'reason', exc)}") from exc
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError as exc:
+        raise ValueError("Music worker returned invalid JSON") from exc
+
+
 def model_management_state():
     registry = _load_model_registry()
     installations = registry.setdefault("installations", [])
@@ -200,7 +531,13 @@ def model_management_state():
     if platform_id == "darwin-arm64":
         recommended = "h3-metal" if hw["memory_gb"] >= 64 else ""
     for item in catalog: item["recommended"] = item["id"] == recommended
-    return {"hardware":hw, "catalog":catalog, "installations":installations, "loras":loras}
+    music = yue_music_state()
+    for item in catalog:
+        if item.get("media") == "music":
+            item["installed"] = bool((music.get("local") or {}).get("installed"))
+            item["device"] = music.get("device") or (music["selection"] or {}).get("label", "")
+    return {"hardware":hw, "catalog":catalog, "installations":installations, "loras":loras,
+            "music":music}
 
 def uninstall_managed_model(installation_id):
     global H3_MODEL
@@ -384,14 +721,49 @@ def compile_skill_contract(skill_id):
             visual.append(label + ": " + "; ".join(values) + ".")
     payload = {"id": skill["id"], "instruction": skill.get("instruction"), **lists}
     version = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
-    return {"id": skill["id"], "name": skill["name"], "version": version,
+    media = skill.get("type") or "video"
+    return {"id": skill["id"], "name": skill["name"], "version": version, "media": media,
             "refinement_direction": " ".join(refinement),
-            "visual_direction": " ".join(visual), "validators": lists}
+            "visual_direction": "" if media == "music" else " ".join(visual),
+            "music_direction": " ".join(refinement) if media == "music" else "", "validators": lists}
 
 def compiled_skill_direction(skill_id):
     """Return the concise invariant contract used by refinement and formatting."""
     compiled = compile_skill_contract(skill_id)
     return compiled["refinement_direction"] if compiled else ""
+
+def refine_music_brief(idea, lyrics="", skill_id=""):
+    """Use the configured refinement model as an editor before YuE sees a request."""
+    idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
+    if not idea and not lyrics:
+        raise ValueError("Describe the song or provide lyrics first.")
+    direction = compiled_skill_direction(skill_id)
+    fallback_style = idea
+    if direction and direction.lower() not in idea.lower():
+        fallback_style = (idea + (". " if idea else "") + direction).strip()
+    if not formatter_available():
+        return {"style": fallback_style, "lyrics": lyrics, "used_ai": False}
+    instruction = (
+        "Act as a music editor preparing a YuE 2 request. Return JSON only with keys style and lyrics. "
+        "Style must be concise audible direction: language, genre, tempo or feel, ensemble, vocal timbre, production, and emotional arc. "
+        "If lyrics are supplied, preserve every word and line in the same order; you may only add bracketed section labels. "
+        "If lyrics are empty, draft concise singable sectioned lyrics only when the brief asks for a song with vocals; for instrumental work return [Instrumental]. "
+        "Never promise duration, stems, voice cloning, reference-audio imitation, or an artist match.\n"
+        f"SKILL:\n{direction}\nBRIEF:\n{idea}\nLYRICS:\n{lyrics}")
+    cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "1200", "--temp", "0.2",
+           "--seed", "0", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
+    try:
+        run = run_formatter_command(cmd, timeout=90)
+        data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
+        style, refined_lyrics = str(data.get("style") or "").strip(), str(data.get("lyrics") or "").strip()
+        original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
+        refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
+        if run.returncode == 0 and style and refined_lyrics and (not lyrics or original_lines == refined_lines):
+            return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
+                    "lyrics": refined_lyrics[:yue_prompts.MAX_LYRICS_CHARS], "used_ai": True}
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+        pass
+    return {"style": fallback_style, "lyrics": lyrics, "used_ai": False}
 
 def discover_model_sources():
     """Inventory compatible local files and running local inference servers."""
@@ -434,6 +806,25 @@ def discover_model_sources():
              "roles":[{"id":"prompt_refinement", "label":"Prompt refinement"}],
              "active_role":"prompt_refinement", "active":True})
 
+    selection = yue_selection()
+    local_music = yue_local_runtime()
+    if local_music["present"]:
+        add({"kind":"yue_local", "provider":"OpenMagia", "name":"YuE 2 · " + (local_music["device"] or "managed runtime"),
+             "path":str(YUE_LOCAL_DIR), "compatible":True,
+             "roles":[{"id":"music_generation", "label":"Music generation"}],
+             "active_role":"music_generation" if selection["mode"] == "local" else "",
+             "active":selection["mode"] == "local",
+             "note":"7.3 GB song model + 0.53 GB decoder · OpenMagia starts the worker itself"})
+    music_url = yue_endpoint_target()
+    if music_url:
+        health = music_health_cached(music_url, yue_endpoint_token())
+        add({"kind":"yue_worker", "provider":"YuE 2 worker", "name":str(health.get("device") or "YuE 2 worker"),
+             "endpoint":music_url, "compatible":True,
+             "roles":[{"id":"music_generation", "label":"Music generation"}],
+             "active_role":"music_generation" if selection["mode"] == "endpoint" else "",
+             "active":selection["mode"] == "endpoint", "healthy":bool(health.get("ok")),
+             "note":str(health.get("error") or ("ready" if health.get("ok") else "unreachable"))})
+
     for provider, endpoint in (("LM Studio", "http://127.0.0.1:1234/v1"), ("MLX-LM", "http://127.0.0.1:8080/v1")):
         try:
             req = urllib.request.Request(endpoint + "/models", headers={"Accept":"application/json"})
@@ -452,11 +843,13 @@ def discover_model_sources():
             pass
     return found
 
-def select_model_source(kind, path="", endpoint="", model_id="", role=""):
+def select_model_source(kind, path="", endpoint="", model_id="", role="", token=""):
     global H3_MODEL, FORMATTER_MODEL, FORMATTER_ENDPOINT, FORMATTER_MODEL_ID
     supplied = Path(path).expanduser()
     candidate = supplied.resolve()
-    expected_role = "video_generation" if kind == "h3" else "prompt_refinement"
+    music_kinds = {"yue_local", "yue_worker", "yue_off"}
+    expected_role = "video_generation" if kind == "h3" else (
+        "music_generation" if kind in music_kinds else "prompt_refinement")
     if role and role != expected_role:
         raise ValueError("That model is not compatible with the selected OpenMagia role.")
     if kind == "h3":
@@ -472,11 +865,29 @@ def select_model_source(kind, path="", endpoint="", model_id="", role=""):
             raise ValueError("Only a named model on a localhost HTTP server can be connected.")
         FORMATTER_ENDPOINT = endpoint.rstrip("/"); FORMATTER_MODEL_ID = model_id
         _saved_model_sources.update({"formatter_endpoint":FORMATTER_ENDPOINT, "formatter_model_id":FORMATTER_MODEL_ID})
+    elif kind == "yue_local":
+        if not yue_local_runtime()["present"]:
+            raise ValueError("No YuE 2 runtime on this machine yet — install it under Settings · Models.")
+        _saved_model_sources.update({"yue_endpoint":"", "yue_token":""})
+        stop_local_worker()          # a stale worker on the port is not this selection
+    elif kind == "yue_worker":
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("A YuE 2 worker address must start with http:// or https://")
+        health = music_health_payload(endpoint.rstrip("/"), token or "", timeout=8.0)
+        if not health.get("ok"):
+            raise ValueError(str(health.get("error") or "That address is not a YuE 2 worker."))
+        _saved_model_sources.update({"yue_endpoint":endpoint.rstrip("/"), "yue_token":(token or "").strip()})
+    elif kind == "yue_off":
+        _saved_model_sources.update({"yue_endpoint":"", "yue_token":""})
+        stop_local_worker()
     else:
         raise ValueError("This source cannot be selected for that OpenMagia role yet.")
     MODEL_SOURCE_FILE.parent.mkdir(parents=True, exist_ok=True)
     MODEL_SOURCE_FILE.write_text(json.dumps(_saved_model_sources, indent=2) + "\n")
-    return {"ok":True, "kind":kind, "path":str(candidate)}
+    MUSIC_HEALTH_CACHE.clear()
+    return {"ok":True, "kind":kind, "path":str(candidate), "music":yue_music_state(force=True)
+            if kind in music_kinds else {}}
 
 def ref2va_available():
     return (Path(H3_MODEL) / "Ref2VA" / "transformer" / "config.json").exists()
@@ -589,7 +1000,12 @@ def terminate_process_tree(proc, timeout=5):
 def install_model_component(component):
     """Run an immutable snapshot of the idempotent installer in the background."""
     model_installs[component] = {"status": "running", "message": "Preparing download…"}
-    flags = ["--no-formatter"] if component == "h3" else ["--no-models", "--no-h3"]
+    if component == "h3":
+        flags = ["--no-formatter"]
+    elif component == "yue":
+        flags = ["--no-models", "--no-h3", "--with-yue"]
+    else:
+        flags = ["--no-models", "--no-h3"]
     snapshot = None
     try:
         # Bash may read a long-running script incrementally. Running a private
@@ -1583,8 +1999,45 @@ def make_magia_storyboard(payload, project, use_model=True):
             "scene_seconds": [round(value / FPS, 3) for value in durations]}
 
 
+def next_music_name(project):
+    used = {str(s.get("name") or "") for s in project.get("scenes", [])}
+    index = len([s for s in project.get("scenes", []) if str(s.get("name") or "").startswith("Song ")]) + 1
+    while f"Song {index}" in used:
+        index += 1
+    return f"Song {index}"
+
+
+def clamp_music_params(params):
+    """Music parameters: only what a YuE 2 request can actually carry.
+
+    No frames, no width, no steps - and deliberately no duration, because YuE 2
+    has none. Whatever is dropped here is a control the UI must not offer.
+    """
+    out = {}
+    mode = str((params or {}).get("plan_mode") or "full")
+    out["plan_mode"] = mode if mode in yue_prompts.PLAN_MODES else "full"
+    out["lyrics"] = str((params or {}).get("lyrics") or "")[:yue_prompts.MAX_LYRICS_CHARS]
+    out["abc"] = str((params or {}).get("abc") or "")[:yue_prompts.MAX_ABC_CHARS]
+    out["instrumental"] = bool((params or {}).get("instrumental"))
+    try:
+        out["seed"] = max(0, min(2 ** 31 - 1, int((params or {}).get("seed", 42))))
+    except (TypeError, ValueError):
+        out["seed"] = 42
+    guidance = (params or {}).get("guidance")
+    if guidance in (None, ""):
+        out["guidance"] = None
+    else:
+        try:
+            out["guidance"] = max(1.0, min(2.0, float(guidance)))
+        except (TypeError, ValueError):
+            out["guidance"] = None
+    return out
+
+
 def clamp_generation_params(params, generation_type="video"):
     """Normalize user parameters at the trust boundary."""
+    if generation_type == "music":
+        return clamp_music_params(params)
     out = dict(params)
     out["frames"] = 5 if generation_type == "image" else max(8, min(MAX_FRAMES, int(out.get("frames", 56))))
     # h3.c rejects fewer than two denoising steps, so clamp at the API
@@ -2887,6 +3340,42 @@ def _timeline_magia_number(seed, key, modulo=10000):
 
 timeline_magia_direction_cache = {}
 
+# Curated, bounded editing recipes inspired by ffmpeg-skill's typed
+# probe/edit/verify workflow. They map to OpenMagia's native clip model; no
+# third-party executable code or free-form FFmpeg filter strings are accepted.
+TIMELINE_MAGIA_RECIPES = {
+    "subtle": {"name": "Subtle continuity", "direction": "minimal gentle continuity polish",
+               "intensity": .58, "transitions": ["dissolve", "fade"], "trim": .55,
+               "motion": .55, "overlay_count": 0, "audio_fade": .12},
+    "narrative": {"name": "Clean narrative", "direction": "purposeful narrative rhythm, restrained motion, natural color",
+                   "intensity": .82, "transitions": ["dissolve", "fade", "wipe"], "trim": .85,
+                   "motion": .72, "overlay_count": 1, "audio_fade": .16},
+    "social": {"name": "Social energy", "direction": "fast energetic punchy social edit",
+                "intensity": 1.22, "transitions": ["slide", "wipe", "dissolve"], "trim": 1.35,
+                "motion": 1.25, "overlay_count": 2, "audio_fade": .09},
+    "cinematic": {"name": "Cinematic restraint", "direction": "cinematic moody high contrast restrained edit",
+                   "intensity": .74, "transitions": ["fade", "dissolve"], "trim": .65,
+                   "motion": .62, "overlay_count": 1, "audio_fade": .22},
+    "audio-first": {"name": "Audio-first clarity", "direction": "clear dialogue gentle pacing minimal visual effects",
+                     "intensity": .62, "transitions": ["dissolve"], "trim": .45,
+                     "motion": .4, "overlay_count": 0, "audio_fade": .28},
+}
+
+
+# Recipe identity is deterministic. Optional AI direction can override the grade,
+# but must not collapse every built-in recipe to the same "balanced" treatment.
+TIMELINE_MAGIA_LOOKS = {
+    "subtle": {"contrast": 1.025, "saturation": 1.02, "exposure": 0, "temperature": 0},
+    "narrative": {"contrast": 1.06, "saturation": 1.04, "exposure": .015, "temperature": .025},
+    "social": {"contrast": 1.18, "saturation": 1.30, "exposure": .06, "temperature": .045},
+    "cinematic": {"contrast": 1.18, "saturation": .86, "exposure": -.07, "temperature": -.06},
+    "audio-first": {"contrast": 1.0, "saturation": 1.0, "exposure": 0, "temperature": 0},
+}
+TIMELINE_MAGIA_TRANSITION_SECONDS = {
+    "subtle": (.24, .40), "narrative": (.40, .62), "social": (.18, .32),
+    "cinematic": (.80, 1.15), "audio-first": (.30, .48),
+}
+
 
 def interpret_timeline_magia_direction(direction, use_ai=False):
     """Convert free prose into bounded editor choices; optionally ask the local refiner."""
@@ -2940,19 +3429,67 @@ def interpret_timeline_magia_direction(direction, use_ai=False):
     return value
 
 
+MAGIA_CATEGORY_KEYS = {"transitions": ("transition",),
+                     "transforms": ("zoom", "position", "motion", "keyframes"),
+                     "color": ("color",), "pacing": ("start", "out"),
+                     "overlays": ("zoom", "position", "mask"), "audio": ("audioFade",),
+                     "audio_cleanup": ("audioProcessing",), "loudness": ("audioProcessing",)}
+
+
+def restore_magia_effects(clip, categories=None):
+    """Restore pre-preset values, including categories sharing a field."""
+    provenance = clip.get("magiaEffects") or {}
+    chosen = set(provenance if categories is None else categories) & set(provenance)
+    keys = {key for category in chosen for key in MAGIA_CATEGORY_KEYS.get(category, ())}
+    chosen |= {category for category in provenance
+               if keys.intersection(MAGIA_CATEGORY_KEYS.get(category, ()))}
+    for category in MAGIA_CATEGORY_KEYS:
+        if category not in chosen:
+            continue
+        original = provenance.pop(category) or {}
+        if category == "transitions":
+            current = (clip.get("transition") or {}).get("items", [])
+            manual = [item for item in current if not str(item.get("id") or "").startswith("magia-")]
+            if manual:
+                original = {**original, "transition": {"items": json.loads(json.dumps(manual))}}
+        for key in MAGIA_CATEGORY_KEYS.get(category, ()):
+            clip.pop(key, None)
+        clip.update(json.loads(json.dumps(original)))
+    if not provenance:
+        clip.pop("magiaEffects", None)
+        clip.pop("magiaRecipe", None)
+    return bool(chosen)
+
+
 def timeline_magia_plan(project, request=None):
     """Build an editable, export-safe effect plan from existing Inspector fields."""
     request = request or {}
+    project = json.loads(json.dumps(project))
+    selected_id = str(request.get("selected_clip_id") or "")
+    if request.get("scope") == "selected" and not any(
+            clip.get("id") == selected_id for track in project.get("tracks", [])
+            if track.get("kind") == "video" for clip in track.get("clips", [])):
+        raise ValueError("Select a video clip before applying to a selected clip")
+    for track in project.get("tracks", []):
+        for clip in track.get("clips", []):
+            if request.get("scope") != "selected" or clip.get("id") == selected_id:
+                restore_magia_effects(clip)
     options = {"transitions": True, "transforms": True, "color": True,
                "pacing": True, "overlays": True, "audio": True,
+               "audio_cleanup": False, "loudness": False,
                **(request.get("options") or {})}
     seed = int(request.get("seed") or time.time_ns() % 2147483647)
-    direction = str(request.get("direction") or "").strip()
-    interpreted = interpret_timeline_magia_direction(direction, bool(request.get("use_ai")))
-    intensity = {"subtle": .72, "dynamic": 1.22}.get(interpreted["intensity"], 1.0)
+    recipe_id = str(request.get("recipe_id") or "").strip()
+    if recipe_id and recipe_id not in TIMELINE_MAGIA_RECIPES:
+        raise ValueError("Unknown timeline Magia recipe")
+    recipe = TIMELINE_MAGIA_RECIPES.get(recipe_id, {})
+    user_direction = str(request.get("direction") or "").strip()
+    direction = user_direction or str(recipe.get("direction") or "").strip()
+    interpreted = interpret_timeline_magia_direction(direction, bool(request.get("use_ai")) and bool(user_direction))
+    intensity = float(recipe.get("intensity") or {"subtle": .72, "dynamic": 1.22}.get(interpreted["intensity"], 1.0))
     color_intent = interpreted["intent"]
-    profile = ("Subtle polish" if intensity < 1 else ("Dynamic remix" if intensity > 1 else "Balanced edit"))
-    if color_intent != "balanced" and options.get("color", True):
+    profile = recipe.get("name") or ("Subtle polish" if intensity < 1 else ("Dynamic remix" if intensity > 1 else "Balanced edit"))
+    if not recipe and color_intent != "balanced" and options.get("color", True):
         profile = color_intent.capitalize() + " edit"
     tracks = project.get("tracks", [])
     media = {item.get("id"): item for item in project.get("media", [])}
@@ -2966,14 +3503,15 @@ def timeline_magia_plan(project, request=None):
     targets = []
     for track in video_tracks:
         for clip in sorted(track.get("clips", []), key=lambda item: (float(item.get("start", 0)), item.get("id", ""))):
-            if clip.get("magiaOverlay"):
+            if clip.get("magiaOverlay") and scope != "selected":
                 continue
             if scope == "selected" and clip.get("id") != selected_id:
                 continue
             targets.append((track, clip))
     updates, counts = [], {"clips": 0, "transitions": 0, "transforms": 0, "color": 0,
-                           "trimmed": 0, "overlays": 0, "audio": 0}
-    transition_types = ["dissolve", "fade", "wipe", "slide"]
+                           "trimmed": 0, "overlays": 0, "audio": 0,
+                           "audio_cleanup": 0, "loudness": 0}
+    transition_types = recipe.get("transitions") or ["dissolve", "fade", "wipe", "slide"]
     motion_types = ["push-in", "pull-out", "pan-left", "pan-right", "pan-up", "pan-down"]
     base_order = sorted((base or {}).get("clips", []), key=lambda item: (float(item.get("start", 0)), item.get("id", "")))
     base_index = {clip.get("id"): index for index, clip in enumerate(base_order)}
@@ -2981,7 +3519,8 @@ def timeline_magia_plan(project, request=None):
         clip_id = clip.get("id")
         token = _timeline_magia_number(seed, clip_id)
         kind = transition_types[token % len(transition_types)]
-        value = round(min(clip_duration(clip) * .2, (.28 + (token % 29) / 100.0) * intensity), 3)
+        low, high = TIMELINE_MAGIA_TRANSITION_SECONDS.get(recipe_id, (.28 * intensity, .56 * intensity))
+        value = round(min(clip_duration(clip) * .25, low + (high - low) * (token % 29) / 28), 3)
         return kind, value
     can_retime_base = scope == "timeline" and bool(base_order) and options.get("pacing", True)
     retimed = {}
@@ -2990,7 +3529,7 @@ def timeline_magia_plan(project, request=None):
         for index, clip in enumerate(base_order):
             duration = clip_duration(clip)
             token = _timeline_magia_number(seed, f"trim:{clip.get('id')}")
-            trim = 0.0 if duration < 2.2 else min(duration - 1.0, (0.08 + (token % 17) / 100.0) * intensity)
+            trim = 0.0 if duration < 2.2 else min(duration - 1.0, (0.08 + (token % 17) / 100.0) * intensity * float(recipe.get("trim", 1)))
             trim = max(0.0, trim)
             retimed[clip.get("id")] = {"start": round(cursor, 6), "out": round(float(clip.get("out", 0)) - trim, 6), "trim": trim}
             cursor += max(0.05, duration - trim)
@@ -3019,7 +3558,11 @@ def timeline_magia_plan(project, request=None):
                 transition_items = [{"id": f"magia-{seed}-{clip_id}", "type": kind, "edge": "start",
                                      "dur": duration_value, "enabled": True}]
             if transition_items:
-                fields["transition"] = {"items": transition_items}
+                previous = clip.get("transition") or {}
+                manual_items = previous.get("items")
+                if not isinstance(manual_items, list):
+                    manual_items = [{**previous, "id": previous.get("id") or f"tr-legacy-{clip_id}"}] if previous.get("type") not in (None, "cut") else []
+                fields["transition"] = {"items": manual_items + transition_items}
                 labels.append(" + ".join(f"{item['type']} {item['dur']:.2f}s" for item in transition_items))
                 counts["transitions"] += len(transition_items)
         if is_overlay and options.get("overlays", True):
@@ -3035,17 +3578,25 @@ def timeline_magia_plan(project, request=None):
             index = base_index.get(clip_id, 0)
             incoming = transition_recipe(clip)[1] / duration if index > 0 else 0
             outgoing = transition_recipe(base_order[index + 1])[1] / duration if index < len(base_order) - 1 else 0
-            start_zoom = round(1.10 + (token % 4) * .015 * intensity, 3) if incoming else 1.0
-            end_zoom = round(.94 - (token % 3) * .01 * intensity, 3) if outgoing else round(1.02 + (token % 3) * .01, 3)
-            points = [{"id": f"magia-{seed}-{clip_id}-start", "at": 0, "zoom": start_zoom, "x": .5, "y": .5}]
+            motion_strength=float(recipe.get("motion", 1))
+            start_zoom = round(1.0 + (.10 + (token % 4) * .015 * intensity) * motion_strength, 3) if incoming else 1.0
+            end_zoom = round(1.0-(.06+(token%3)*.01*intensity)*motion_strength,3) if outgoing else round(1.0+(.02+(token%3)*.01)*motion_strength,3)
+            pan_axis = token % 4
+            pan = round(.012 + .012 * motion_strength, 4)
+            start_x, start_y, end_x, end_y = .5, .5, .5, .5
+            if pan_axis == 0: start_x, end_x = .5-pan, .5+pan
+            elif pan_axis == 1: start_x, end_x = .5+pan, .5-pan
+            elif pan_axis == 2: start_y, end_y = .5-pan, .5+pan
+            else: start_y, end_y = .5+pan, .5-pan
+            points = [{"id": f"magia-{seed}-{clip_id}-start", "at": 0, "zoom": start_zoom, "x": start_x, "y": start_y}]
             if incoming:
                 points.append({"id": f"magia-{seed}-{clip_id}-settle", "at": round(min(.35, max(.08, incoming)), 4), "zoom": 1.0, "x": .5, "y": .5})
             if outgoing:
                 points.append({"id": f"magia-{seed}-{clip_id}-exit", "at": round(max(.55, 1 - outgoing), 4), "zoom": 1.0, "x": .5, "y": .5})
-            points.append({"id": f"magia-{seed}-{clip_id}-end", "at": 1, "zoom": end_zoom, "x": .5, "y": .5})
+            points.append({"id": f"magia-{seed}-{clip_id}-end", "at": 1, "zoom": end_zoom, "x": end_x, "y": end_y})
             fields.update(zoom=1.0, position={"x": 0, "y": 0}, motion={"type": "none"},
                           keyframes={"enabled": True, "points": points})
-            labels.append(f"zoom {round(start_zoom*100):d}→100→{round(end_zoom*100):d}%")
+            labels.append(f"reframe {round(start_zoom*100):d}→{round(end_zoom*100):d}%")
             counts["transforms"] += 1
         if options.get("color", True):
             warm = ((token // 7) % 9 - 4) / 100.0 * intensity
@@ -3059,12 +3610,26 @@ def timeline_magia_plan(project, request=None):
                                "saturation": round(saturation + (token % 4) * .025 * intensity, 3),
                                "temperature": round(temperature, 3), "tint": round(tint_bias, 3),
                                "highlights": round(-.06 * intensity, 3), "shadows": round(.045 * intensity, 3)}
-            labels.append(color_intent + " color")
+            if recipe_id in TIMELINE_MAGIA_LOOKS and not user_direction:
+                fields["color"].update(TIMELINE_MAGIA_LOOKS[recipe_id])
+                fields["color"].update(tint=0, highlights=0, shadows=0)
+            labels.append((recipe.get("name", color_intent) if not user_direction else color_intent) + " color")
             counts["color"] += 1
         if options.get("audio", True):
-            fade = round(min(.18 * intensity, duration * .1), 3)
+            fade = round(min(float(recipe.get("audio_fade", .18)) * intensity, duration * .1), 3)
             fields["audioFade"] = {"in": fade, "out": fade}
             counts["audio"] += 1
+        processing = {}
+        if options.get("audio_cleanup", True):
+            processing.update({"voice": True, "denoise": True, "compress": True})
+            labels.append("voice cleanup")
+            counts["audio_cleanup"] += 1
+        if options.get("loudness", True):
+            processing.update({"loudness": True, "target_lufs": -16.0, "true_peak": -1.5})
+            labels.append("−16 LUFS, −1.5 dBTP")
+            counts["loudness"] += 1
+        if processing:
+            fields["audioProcessing"] = processing
         if fields:
             categories = []
             if "transition" in fields: categories.append("transitions")
@@ -3073,6 +3638,9 @@ def timeline_magia_plan(project, request=None):
             elif any(key in fields for key in ("zoom", "position", "motion", "keyframes")): categories.append("transforms")
             if "color" in fields: categories.append("color")
             if "audioFade" in fields: categories.append("audio")
+            if "audioProcessing" in fields:
+                if options.get("audio_cleanup", True): categories.append("audio_cleanup")
+                if options.get("loudness", True): categories.append("loudness")
             updates.append({"clip_id": clip_id, "track_id": track.get("id"),
                             "name": item.get("name") or clip_id, "fields": fields,
                             "categories": categories, "changes": labels})
@@ -3090,7 +3658,8 @@ def timeline_magia_plan(project, request=None):
             {"name": "cinematic window", "zoom": 1.0, "position": {"x": 0, "y": 0},
              "mask": {"enabled": True, "type": "cinematic", "x": 50, "y": 50, "width": 100, "height": 38, "invert": False}},
         ]
-        for overlay_index, source_index in enumerate(candidate_indexes):
+        overlay_limit=int(recipe.get("overlay_count", len(candidate_indexes)))
+        for overlay_index, source_index in enumerate(candidate_indexes[:overlay_limit]):
             if source_index >= len(base_order):
                 continue
             source = base_order[source_index]
@@ -3121,7 +3690,8 @@ def timeline_magia_plan(project, request=None):
                             "changes": [treatment["name"], f"next-scene preview {duration:.2f}s", f"fade {fade:.2f}s"]})
             counts["clips"] += 1
             counts["overlays"] += 1
-    return {"seed": seed, "profile": profile, "direction": direction,
+    return {"seed": seed, "profile": profile, "recipe_id": recipe_id,
+            "direction": direction, "user_direction": user_direction,
             "direction_note": interpreted["note"], "scope": scope,
             "selected_clip_id": selected_id,
             "options": options, "updates": updates, "summary": counts, "used_ai": interpreted["used_ai"]}
@@ -3130,11 +3700,8 @@ def timeline_magia_plan(project, request=None):
 def apply_timeline_magia_plan(project, plan):
     by_id = {clip.get("id"): clip for track in project.get("tracks", []) for clip in track.get("clips", [])}
     allowed = {"start", "in", "out", "zoom", "position", "motion", "keyframes", "color", "blur",
-               "mask", "audioFade", "volume", "transition", "muted"}
-    category_keys = {"transitions": ("transition",),
-                     "transforms": ("zoom", "position", "motion", "keyframes"),
-                     "color": ("color",), "pacing": ("start", "out"),
-                     "overlays": ("zoom", "position", "mask"), "audio": ("audioFade",)}
+               "mask", "audioFade", "audioProcessing", "volume", "transition", "muted"}
+    category_keys = MAGIA_CATEGORY_KEYS
     options = plan.get("options") or {}
     scope = plan.get("scope") or "timeline"
     selected_id = str(plan.get("selected_clip_id") or "")
@@ -3143,7 +3710,7 @@ def apply_timeline_magia_plan(project, plan):
         # Generated overlays are wholly owned by Magia. Every apply replaces
         # them when enabled or removes them when the option is unchecked.
         before_count = len(track.get("clips", []))
-        if track.get("id") == OVERLAY_TRACK:
+        if scope == "timeline" and track.get("id") == OVERLAY_TRACK:
             track["clips"] = [clip for clip in track.get("clips", [])
                               if not (clip.get("magiaOverlay") is True and str(clip.get("id") or "").startswith("magia-overlay-"))]
         applied += before_count - len(track["clips"])
@@ -3161,17 +3728,10 @@ def apply_timeline_magia_plan(project, plan):
                 if any(value.startswith("magia-") for value in keyframe_ids): provenance["transforms"] = {}
                 if "color" in clip: provenance["color"] = {}
                 if "audioFade" in clip: provenance["audio"] = {}
-            restored = False
-            for category, keys in category_keys.items():
-                if options.get(category, True) or category not in provenance:
-                    continue
-                original = provenance.pop(category) or {}
-                for key in keys: clip.pop(key, None)
-                for key, value in original.items(): clip[key] = json.loads(json.dumps(value))
-                restored = True
-            if provenance: clip["magiaEffects"] = provenance
-            else: clip.pop("magiaEffects", None)
-            if restored: applied += 1
+            if provenance:
+                clip["magiaEffects"] = provenance
+            if restore_magia_effects(clip):
+                applied += 1
     for update in plan.get("updates", []):
         create = update.get("create")
         if create:
@@ -3186,6 +3746,7 @@ def apply_timeline_magia_plan(project, plan):
         clip = by_id.get(update.get("clip_id"))
         if not clip:
             continue
+        clip["magiaRecipe"] = {"id": plan.get("recipe_id"), "name": plan.get("profile")}
         provenance = clip.setdefault("magiaEffects", {})
         for category in update.get("categories") or []:
             if category in provenance:
@@ -3197,6 +3758,16 @@ def apply_timeline_magia_plan(project, plan):
                 clip[key] = value
         applied += 1
     repair_timeline_overlaps(project)
+    project["timelineMagia"] = {
+        "recipe_id": plan.get("recipe_id") or "",
+        "profile": plan.get("profile") or "",
+        "direction": plan.get("user_direction") or "",
+        "scope": plan.get("scope") or "timeline",
+        "options": json.loads(json.dumps(plan.get("options") or {})),
+        "seed": plan.get("seed"),
+        "summary": json.loads(json.dumps(plan.get("summary") or {})),
+        "applied_at": int(time.time()),
+    }
     return applied
 
 
@@ -3301,6 +3872,185 @@ def monitor_h3_process(proc, scene_id, stall_timeout=H3_STALL_TIMEOUT,
         yield line
 
 
+def music_request_from_scene(scene):
+    """Compile the scene into a YuE 2 request, recompiling the skill contract now.
+
+    Lyrics are the artist's words and travel verbatim; the compiler only removes
+    markdown scaffolding and reports what it removed.
+    """
+    params = scene.get("params") or {}
+    skill_id = str(scene.get("prompt_skill_id") or "")
+    if skill_id:
+        kinds = {item.get("id"): (item.get("type") or "video") for item in skill_catalog()}
+        if skill_id in kinds and kinds[skill_id] != "music":
+            # A shot-writing skill applied to a song would silently rewrite the lyric
+            # into scene directions, so it is refused rather than quietly reinterpreted.
+            raise ValueError(f"'{skill_id}' is a {kinds[skill_id]} skill. YuE 2 takes a music skill "
+                             "(Song director, Score underscore, Album identity) or none.")
+    direction = compiled_skill_direction(skill_id) if skill_id else ""
+    return yue_prompts.format_music_request(
+        idea=scene.get("prompt") or "", lyrics=params.get("lyrics") or "",
+        answers=params.get("answers") or {}, plan_mode=params.get("plan_mode") or "full",
+        abc=params.get("abc") or "", seed=params.get("seed", 42), guidance=params.get("guidance"),
+        instrumental=bool(params.get("instrumental")), skill_direction=direction, skill_id=skill_id,
+        song_id=scene.get("name") or scene["id"])
+
+
+def yue_worker_download(path, timeout=180.0):
+    """Fetch a binary worker artifact (the finished song) as bytes."""
+    target = music_endpoint()
+    if target["mode"] == "none":
+        raise ValueError("No music runtime is configured")
+    request = urllib.request.Request(target["url"] + path, method="GET")
+    if target["token"]:
+        request.add_header("X-Yue-Token", target["token"])
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"Music worker said {exc.code}: {exc.reason}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise ValueError(f"Music worker unreachable: {getattr(exc, 'reason', exc)}") from exc
+
+
+def _music_scene_gone(slug, scene_id):
+    with lock:
+        latest = load_project_slug(slug)
+    return not any(s.get("id") == scene_id for s in latest.get("scenes", []))
+
+
+def run_music_job(scene_id, project):
+    """Run one song through the music runtime and place it on the audio track.
+
+    The runtime owns the clock; OpenMagia only reports its stages, so the progress
+    wording here is YuE 2's own. A song is cancelled by deleting the worker job,
+    and YuE 2 decodes audio only at the end - so a stopped song keeps nothing.
+    """
+    global progress
+    with lock:
+        scene = next((s for s in project["scenes"] if s["id"] == scene_id), None)
+    if scene is None:
+        return
+    try:
+        compiled = music_request_from_scene(scene)
+        job = yue_worker_call("/v1/music", "POST", compiled["request"], timeout=30.0)
+    except Exception as exc:
+        with lock:
+            latest = load_project_slug(project["slug"])
+            failed = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
+            if failed:
+                failed["status"] = "error"; failed["error"] = str(exc)
+            save_project(latest)
+        progress.pop(scene_id, None)
+        return
+    worker_id = str(job.get("id") or "")
+    progress[scene_id] = {"phase": "queued", "completed": 0, "total": 1, "engine": "yue2"}
+    last_seen = time.monotonic()
+    last_phase = ""
+    try:
+        while True:
+            if _music_scene_gone(project["slug"], scene_id):
+                try:
+                    yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
+                except Exception:
+                    pass
+                return
+            try:
+                state = yue_worker_call("/v1/music/" + worker_id, timeout=30.0)
+            except ValueError as exc:
+                if "404" in str(exc):
+                    raise ValueError("The music runtime lost the song before it finished.") from exc
+                raise
+            last_seen = time.monotonic()
+            status = str(state.get("status") or "queued")
+            step = dict(state.get("progress") or {})
+            phase = str(step.get("phase") or "working")
+            if phase != last_phase:
+                last_phase = phase
+                audit = compiled["audit"]
+                with lock:
+                    latest = load_project_slug(project["slug"])
+                    live = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
+                    if live is not None:
+                        live["music"] = {"job": worker_id, "phase": phase,
+                                         "plan_mode": audit["plan_mode"],
+                                         "estimated_seconds": audit["estimated_seconds"]}
+                        save_project(latest)
+            progress[scene_id] = {"phase": phase.lower(), "completed": step.get("completed") or 0,
+                                  "total": step.get("total") or 0, "engine": "yue2"}
+            if status == "ready":
+                break
+            if status in ("error", "cancelled"):
+                raise ValueError(str(state.get("error") or "The music runtime stopped this song."))
+            if time.monotonic() - last_seen > MUSIC_STALL_TIMEOUT:
+                try:
+                    yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
+                except Exception:
+                    pass
+                raise TimeoutError(f"The music runtime reported nothing for {MUSIC_STALL_TIMEOUT} seconds.")
+            time.sleep(MUSIC_POLL_SECONDS)
+        result = dict(state.get("result") or {})
+        audio = yue_worker_download("/v1/music/" + worker_id + "/audio")
+        if not audio:
+            raise ValueError("The music runtime returned an empty song.")
+        with lock:
+            project = load_project_slug(project["slug"])
+            scene = next((s for s in project["scenes"] if s["id"] == scene_id), None)
+            if scene is None:
+                return
+            pdir = proj_dir(project["slug"]) / "media"
+            pdir.mkdir(parents=True, exist_ok=True)
+            raw = pdir / f"gen-{scene_id}.flac"
+            raw.write_bytes(audio)
+            info = nle.probe(raw)
+            m = add_media(project, raw, scene["name"], "audio", "generated")
+            m["scene_id"] = scene_id
+            m["style_profile"] = dict(scene.get("style_profile") or {})
+            audit = compiled["audit"]
+            m["generation"] = {"prompt": scene.get("prompt", ""), "params": dict(scene.get("params") or {}),
+                               "prompt_skill_id": scene.get("prompt_skill_id"), "type": "music",
+                               "engine": "yue2",
+                               "music": {"summary": yue_prompts.music_request_summary(compiled["request"]),
+                                         "estimated_seconds": audit.get("estimated_seconds"),
+                                         "plan_mode": audit.get("plan_mode"),
+                                         "sections": audit.get("sections"),
+                                         "removed_lyric_lines": audit.get("lyric_lines_removed"),
+                                         "warnings": audit.get("warnings")}}
+            m["status"] = "ready"
+            seconds = float(result.get("seconds") or info.get("duration") or 0.0)
+            track = next((t for t in project["tracks"] if t.get("kind") == "audio"), None)
+            if track is not None and seconds > 0:
+                start = timeline_end(project, track["id"])
+                clip = {"id": uuid.uuid4().hex[:10], "mediaId": m["id"], "start": start,
+                        "in": 0.0, "out": seconds, "muted": False, "sceneId": scene_id}
+                track["clips"].append(clip)
+                scene["clipId"] = clip["id"]
+            scene["status"] = "ready"
+            scene.pop("error", None)
+            scene["mediaId"] = m["id"]
+            scene["media"] = media_url(m)
+            scene["music"] = {"job": worker_id, "phase": "done", "seconds": seconds,
+                              "truncated": result.get("truncated"), "score": bool(result.get("abc"))}
+            if result.get("abc"):
+                score = pdir / f"gen-{scene_id}.abc"
+                score.write_text(str(result["abc"])[:yue_prompts.MAX_ABC_CHARS])
+                scene["music"]["score_file"] = str(score.relative_to(proj_dir(project["slug"])))
+            save_project(project)
+    except Exception as exc:
+        with lock:
+            latest = load_project_slug(project["slug"])
+            failed = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
+            pending = next((x for x in latest.get("media", []) if x.get("scene_id") == scene_id), None)
+            if failed:
+                failed["status"] = "error"; failed["error"] = str(exc)
+            if pending:
+                pending["status"] = "error"; pending["error"] = str(exc)
+            save_project(latest)
+    finally:
+        progress.pop(scene_id, None)
+        pump_queue(load_project_slug(project["slug"]))
+
+
 def run_job(scene_id, project):
     global active_job, scene_proc
     # HTTP requests each load their own project snapshot. A later enqueue may
@@ -3322,6 +4072,10 @@ def run_job(scene_id, project):
             if pending.get("generation"):
                 pending["generation"]["params"] = dict(scene["params"])
         save_project(project)
+        music_scene = scene.get("generation_type") == "music"
+
+    if music_scene:
+        return run_music_job(scene_id, project)
 
     pdir = proj_dir(project["slug"])
     pdir.mkdir(parents=True, exist_ok=True)
@@ -4124,6 +4878,7 @@ class Handler(BaseHTTPRequestHandler):
                     "memory_gb": SYSTEM_MEMORY_GB,
                     "model_installs": dict(model_installs),
                     "can_undo": bool(undo_stacks.get(proj.get("slug"), [])),
+                    "music": yue_music_state(),
                 }
                 return self._json(out)
         if p == "/api/prompt/templates":
@@ -4134,6 +4889,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(skill_catalog_report())
         if p == "/api/models/discover":
             return self._json({"sources": discover_model_sources()})
+        if p in ("/api/music/state", "/api/music/check"):
+            return self._json(yue_music_state(force=True))
         if p == "/api/models/manage":
             return self._json(model_management_state())
         if p == "/api/sheets/recipes":
@@ -4220,7 +4977,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/models/install":
             b = self._body()
             component = str(b.get("component") or "")
-            if component not in ("h3", "formatter", "runtime"):
+            if component not in ("h3", "formatter", "runtime", "yue"):
                 return self._json({"error": "unknown model component"}, 400)
             if component == "h3" and not b.get("accepted_license"):
                 return self._json({"error": "Accept the MiniMax H3 license before downloading."}, 400)
@@ -4232,12 +4989,41 @@ class Handler(BaseHTTPRequestHandler):
                 model_installs[component] = {"status": "running", "message": "Preparing download…"}
             threading.Thread(target=install_model_component, args=(component,), daemon=True).start()
             return self._json({"ok": True, "status": "running"})
+        if p == "/api/music/preview":
+            # Compile only: what YuE 2 will actually receive, plus what the compiler
+            # removed from the lyric and what it cannot honour. No GPU, no cost.
+            b = self._body()
+            scene = {"id": "preview", "name": str(b.get("name") or "song"),
+                     "prompt": str(b.get("prompt") or ""), "params": dict(b.get("params") or {}),
+                     "prompt_skill_id": str(b.get("prompt_skill_id") or "")}
+            try:
+                compiled = music_request_from_scene(scene)
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            payload = dict(compiled["audit"])
+            payload["request"] = compiled["request"]
+            payload["summary"] = yue_prompts.music_request_summary(compiled["request"])
+            payload["ready"] = bool(yue_music_state()["ready"])
+            return self._json(payload)
+        if p == "/api/music/refine":
+            b = self._body()
+            try:
+                return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        if p == "/api/music/stop":
+            try:
+                stop_local_worker()
+                MUSIC_HEALTH_CACHE.clear()
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
+            return self._json({"ok": True, "music": yue_music_state(force=True)})
         if p == "/api/models/select":
             b = self._body()
             try:
                 return self._json(select_model_source(str(b.get("kind") or ""), str(b.get("path") or ""),
                                                       str(b.get("endpoint") or ""), str(b.get("model_id") or ""),
-                                                      str(b.get("role") or "")))
+                                                      str(b.get("role") or ""), str(b.get("token") or "")))
             except (ValueError, OSError) as exc:
                 return self._json({"error": str(exc)}, 400)
         if p == "/api/models/loras/import":
@@ -4409,7 +5195,10 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             with lock:
                 proj = load_project()
-                plan = timeline_magia_plan(proj, b)
+                try:
+                    plan = timeline_magia_plan(proj, b)
+                except ValueError as error:
+                    return self._json({"error": str(error)}, 400)
                 if p.endswith("/apply"):
                     push_timeline_undo(proj)
                     plan["applied"] = apply_timeline_magia_plan(proj, plan)
@@ -4643,12 +5432,22 @@ class Handler(BaseHTTPRequestHandler):
                 validate_references(references)
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
-            generation_type = "image" if b.get("generation_type") == "image" else "video"
+            requested_type = str(b.get("generation_type") or "video")
+            generation_type = ("music" if requested_type == "music"
+                               else "image" if requested_type == "image" else "video")
+            if generation_type == "music" and (char_ids or reference_media_ids or b.get("source_media_id")):
+                # YuE 2 has no reference-audio or image argument; saying so here
+                # beats queueing a song that silently ignores the artist's work.
+                return self._json({"error": "YuE 2 takes words and style only - no Cast images, "
+                                            "reference media, or frame continuation. Remove them, "
+                                            "or switch back to Video."}, 400)
             if generation_type == "image" and any(item.get("kind") == "audio_reference" for item in selected_refs):
                 return self._json({"error": "Audio references are supported for H3 video generation only. Remove the audio reference or switch to Video."}, 400)
             use_project_style = b.get("use_project_style", proj.get("style_enabled", True)) is not False
             params = clamp_generation_params({**default_params(proj["canvas"]), **b.get("params", {})}, generation_type)
-            s = {"id": sid, "name": b.get("name") or (next_image_name(proj) if generation_type == "image" else next_scene_name(proj)),
+            s = {"id": sid, "name": b.get("name") or (next_image_name(proj) if generation_type == "image"
+                                                      else next_music_name(proj) if generation_type == "music"
+                                                      else next_scene_name(proj)),
                  "prompt": b.get("prompt", ""),
                  "original_prompt": str(b.get("original_prompt") or b.get("prompt") or ""),
                  "refined_prompt": str(b.get("refined_prompt") or b.get("prompt") or ""),
@@ -4663,6 +5462,16 @@ class Handler(BaseHTTPRequestHandler):
                  "source_frame": str(b.get("source_frame") or "last"), "status": "idle", "error": None,
                  "media": None, "mediaId": None, "clipId": None,
                  "first_frame": None, "last_frame": None}
+            if generation_type == "music":
+                # Structural preview only, so the composer and the inspector can state
+                # what the song is made of before anything runs. YuE 2 has no length
+                # argument, hence a band and not a duration.
+                s["music"] = {"plan_mode": params.get("plan_mode", "full"),
+                              "instrumental": bool(params.get("instrumental")),
+                              "sections": yue_prompts.lyric_sections(params.get("lyrics") or ""),
+                              "sung_lines": len(yue_prompts.lyric_lines(params.get("lyrics") or "")),
+                              "estimated_band": list(yue_prompts.estimate_song_band(params.get("lyrics") or "")),
+                              "score": bool(params.get("abc"))}
             proj["scenes"].append(s)
             proj["order"].append(sid)
             save_project(proj)
@@ -4912,6 +5721,7 @@ class Handler(BaseHTTPRequestHandler):
                     "blur": b.get("blur"),
                     "mask": b.get("mask"),
                     "audioFade": b.get("audioFade", {"in": 0.0, "out": 0.0}),
+                    "audioProcessing": b.get("audioProcessing"),
                     "volume": float(b.get("volume", 1.0)),
                     "transition": b.get("transition", {"type": "cut", "dur": 0.0}),
                     "muted": bool(b.get("muted", False)),
@@ -5092,7 +5902,12 @@ class Handler(BaseHTTPRequestHandler):
                     c = next((x for x in t["clips"] if x["id"] == cid), None)
                     if c:
                         destination = t
-                        for k in ("start", "in", "out", "zoom", "position", "muted", "detached", "audioClipId", "audioFade", "volume"):
+                        if "removeMagiaEffects" in b:
+                            categories = b["removeMagiaEffects"]
+                            if not isinstance(categories, list) or any(key not in MAGIA_CATEGORY_KEYS for key in categories):
+                                return self._json({"error": "Unknown effect category"}, 400)
+                            restore_magia_effects(c, categories)
+                        for k in ("start", "in", "out", "zoom", "position", "muted", "detached", "audioClipId", "audioFade", "audioProcessing", "volume"):
                             if k in b:
                                 c[k] = b[k]
                         if "motion" in b:

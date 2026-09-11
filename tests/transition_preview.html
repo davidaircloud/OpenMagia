@@ -1,0 +1,33 @@
+<!doctype html><html><meta charset="utf-8"><title>Transition renderer checks</title>
+<style>body{background:#17171c;color:white;font:15px system-ui;margin:28px}main{display:grid;grid-template-columns:repeat(3,220px);gap:24px}canvas{width:220px;height:140px}small{display:block;color:#aaa}#results{white-space:pre-wrap;line-height:1.8}</style>
+<h1>Actual preview renderer · midpoint frames</h1><p>Outgoing red → incoming blue, each with a white vertical stripe. Tests sample canvas pixels.</p><main></main><pre id="results">Running…</pre>
+<script>
+(async()=>{
+ const source=await(await fetch('../app.js')).text();
+ const definitions=source.slice(source.indexOf('function drawTransition('),source.indexOf('/* ---------------- audio',source.indexOf('function drawTransition(')));
+ const transitions=source.slice(source.indexOf('function transitionItems('),source.indexOf('function clipHasAnimation('));
+ const state={canvas:{width:220,height:140}};
+ const results=[],assert=(yes,label)=>{if(!yes)throw new Error(label);results.push('PASS · '+label)};
+ let colors={a:'#ff0000',b:'#0000ff'};
+ const getVideoEl=(media,id)=>({id,color:colors[media.id]});
+ const drawClipCover=(ctx,c,el)=>{ctx.fillStyle=el.color;ctx.fillRect(0,0,220,140);ctx.fillStyle='white';ctx.fillRect(44,0,10,140)};
+ const runtime=new Function('state','clamp','mediaById','getVideoEl','seek','clipMotion','drawClipCover',transitions+definitions+';return {drawBaseTrack,drawOverlayTrack};')(state,(v,l,h)=>Math.max(l,Math.min(h,v)),id=>({id}),getVideoEl,()=>{},()=>({}),drawClipCover);
+ const sample=(ctx,x,y=70)=>Array.from(ctx.getImageData(x,y,1,1).data);
+ const clip=(id,mediaId,start,type)=>({id,mediaId,start,in:0,out:2,transition:{items:type?[{id:'tr',type,dur:1}]:[]}});
+ const frames={};
+ for(const type of ['cut','dissolve','fade','wipe','slide','circle']){
+  const item=document.createElement('section');item.innerHTML='<b>'+type+'</b><small>50% through transition</small>';const cv=document.createElement('canvas');cv.width=220;cv.height=140;item.append(cv);document.querySelector('main').append(item);
+  const ctx=cv.getContext('2d',{willReadFrequently:true});ctx.fillStyle='black';ctx.fillRect(0,0,220,140);
+  runtime.drawBaseTrack(ctx,{clips:[clip('a','a',0),clip('b','b',2,type==='cut'?null:type)]},2.5);frames[type]=ctx;
+ }
+ const mid=sample(frames.dissolve,100);assert(Math.abs(mid[0]-127)<=1&&Math.abs(mid[2]-128)<=1&&mid[3]===255,'Dissolve is a 50/50 blend without a dark dip');
+ assert(sample(frames.wipe,20)[0]===255&&sample(frames.wipe,200)[2]===255,'Wipe reveals blue from the right, preserving red on the left');
+ assert(sample(frames.slide,158)[0]===255&&sample(frames.slide,158)[1]===255&&sample(frames.wipe,158)[0]===0,'Slide moves the incoming stripe; it is visibly different from wipe');
+ assert(sample(frames.circle,110)[2]===255&&sample(frames.circle,0,0)[0]===255,'Circle reveals the center while preserving the corners');
+ assert(sample(frames.fade,100).slice(0,3).every(value=>value===0),'Fade dips through black instead of dissolving');
+ assert(sample(frames.cut,100)[2]===255&&sample(frames.cut,100)[0]===0,'Cut shows only incoming footage');
+ const cv=document.createElement('canvas');cv.width=220;cv.height=140;const ctx=cv.getContext('2d');
+ runtime.drawBaseTrack(ctx,{clips:[clip('a','a',0),clip('b','b',2,'dissolve')]},3.2);assert(sample(ctx,100)[2]===255,'Transition completes with full incoming footage');
+ document.querySelector('#results').textContent=results.join('\n');
+})().catch(error=>{document.querySelector('#results').textContent='FAIL · '+error.message;console.error(error)});
+</script></html>

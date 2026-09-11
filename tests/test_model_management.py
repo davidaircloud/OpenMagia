@@ -20,7 +20,11 @@ class ModelManagementTests(unittest.TestCase):
         self.assertTrue(next(item for item in state["catalog"] if item["recommended"])["installed"] is False)
 
     def test_only_integrated_backend_is_advertised_as_installable(self):
-        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal"])
+        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal", "yue2"])
+        # Every advertised backend states which medium it actually produces, and
+        # nothing is offered as installable without an execution path behind it.
+        self.assertEqual([item.get("media") for item in server.MODEL_BACKENDS], ["video", "music"])
+        self.assertTrue(all(item.get("install_component") for item in server.MODEL_BACKENDS))
         self.assertEqual(server.MODEL_BACKENDS[0]["install_component"], "h3")
 
     def test_catalog_does_not_recommend_unintegrated_streaming_backend(self):

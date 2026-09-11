@@ -306,7 +306,7 @@ def render_video_pre(clip, media, canvas, outdir, mode="cover"):
 
     if mode == "contain":
         # PiP: width scales with zoom, height keeps aspect (even dimension)
-        scale = f"scale={max(2, int(round(W*zoom)) // 2 * 2)}:-2"
+        scale = f"scale=w='ceil(iw*max({W}/iw,{H}/ih)*{zoom:.9f}/2)*2':h='ceil(ih*max({W}/iw,{H}/ih)*{zoom:.9f}/2)*2'"
         tail = [f"fps={FPS}", "setsar=1", "format=yuv420p"]
     else:
         # First make the plain cover frame, then apply the user's zoom to that
@@ -358,6 +358,17 @@ def render_audio_pre(clip, media, outdir):
     volume = max(0.0, min(2.0, float(clip.get("volume", 1.0))))
     if volume != 1.0:
         filters.append(f"volume={volume:.3f}")
+    processing = clip.get("audioProcessing") or {}
+    if processing.get("voice"):
+        filters.extend(["highpass=f=80", "lowpass=f=12000"])
+    if processing.get("denoise"):
+        filters.append("afftdn=nf=-25")
+    if processing.get("compress"):
+        filters.append("acompressor=threshold=0.10:ratio=3:attack=20:release=250:makeup=1.4")
+    if processing.get("loudness"):
+        target = max(-24.0, min(-9.0, float(processing.get("target_lufs", -16))))
+        peak = max(-3.0, min(-.1, float(processing.get("true_peak", -1.5))))
+        filters.append(f"loudnorm=I={target:.1f}:TP={peak:.1f}:LRA=11")
     if fade_in > 0:
         filters.append(f"afade=t=in:st=0:d={fade_in:.3f}")
     if fade_out > 0:
@@ -375,7 +386,7 @@ def _clip_dur(clip):
 
 
 def _transition_for(clip, edge="start"):
-    """Return the strongest enabled transition in the current UI schema."""
+    """Return the latest enabled transition on the requested edge."""
     transition = clip.get("transition") or {}
     items = transition.get("items")
     if isinstance(items, list):
@@ -383,7 +394,7 @@ def _transition_for(clip, edge="start"):
                       and x.get("type") != "cut" and x.get("edge", "start") == edge
                       and float(x.get("dur", 0) or 0) > 0]
         if candidates:
-            return max(candidates, key=lambda x: float(x.get("dur", 0) or 0))
+            return candidates[-1]
         return {"type": "cut", "dur": 0.0}
     if edge == "start":
         return transition
@@ -391,7 +402,7 @@ def _transition_for(clip, edge="start"):
 
 
 def _transition_duration(clip, edge):
-    """Match the preview: strongest enabled transition controls each edge."""
+    """Match the preview: latest enabled transition controls each edge."""
     transition = _transition_for(clip, edge)
     if transition.get("type", "cut") == "cut" or transition.get("enabled", True) is False:
         return 0.0
@@ -414,6 +425,45 @@ def _base_video_track(tracks):
     """Match the browser compositor: lowest occupied, unmuted video lane."""
     visible = [t for t in tracks if t.get("kind") == "video" and not t.get("muted")]
     return next((t for t in reversed(visible) if t.get("clips")), None)
+
+
+def _edge_vf(clip, edge, alpha=False):
+    """Single-clip edge against black (base) or transparency (overlay)."""
+    tr = _transition_for(clip, edge)
+    duration = _transition_duration(clip, edge)
+    if duration <= 0:
+        return []
+    p = f"clip(T/{duration:.9f},0,1)" if edge == "start" else f"clip(({_clip_dur(clip):.9f}-T)/{duration:.9f},0,1)"
+    kind = tr.get("type")
+    factor = p
+    if kind == "wipe":
+        factor = f"gte(X,W*(1-({p})))"
+    elif kind == "circle":
+        factor = f"lte(hypot(X-W/2,Y-H/2),hypot(W,H)*({p})/2)"
+    if kind == "slide":
+        shift = f"(1-({p}))*W" if edge == "start" else f"-(1-({p}))*W"
+        x = f"X-({shift})"
+        factor = f"between({x},0,W-1)"
+    else:
+        x = "X"
+    channels = [f"{ch}='{ch}({x},Y)" + ("'" if alpha else f"*({factor})'") for ch in ("r", "g", "b")]
+    if alpha:
+        channels.append(f"a='alpha({x},Y)*({factor})'")
+    return ["format=rgba", "geq=" + ":".join(channels)]
+
+
+def _join_transition(kind):
+    # xfade's P runs from one to zero. RGB avoids limited-range black/chroma
+    # offsets in the dip-to-black expression.
+    expressions = {
+        "dissolve": "A*P+B*(1-P)",
+        "fade": "if(gt(P,0.5),A*(2*P-1),B*(1-2*P))",
+        "wipe": "if(gte(X,W*P),B,A)",
+        "circle": "if(lte(hypot(X-W/2,Y-H/2),hypot(W,H)*(1-P)/2),B,A)",
+    }
+    if kind == "slide":
+        return "transition=slideleft"
+    return "transition=custom:expr='" + expressions.get(kind, expressions["dissolve"]) + "'"
 
 
 def export_project(project, root):
@@ -488,13 +538,16 @@ def export_project(project, root):
         # mp4 pre-renders can carry different container timebases (1/1000000
         # vs 1/12288); xfade rejects mismatched timebases, so force a common one.
         norm = f"[b{i}]"
-        fc.append(f"[{idx}:v]fps={FPS},settb=AVTB,format=yuv420p{norm}")
+        adjacent = i > 0 and abs(float(c["start"]) - (float(base_clips[i-1]["start"]) + _clip_dur(base_clips[i-1]))) < .05
+        edge_filters = ([] if adjacent else _edge_vf(c, "start")) + _edge_vf(c, "end")
+        normalize = [f"fps={FPS}", f"settb=1/{FPS}", *edge_filters, "format=gbrp"]
+        fc.append(f"[{idx}:v]{','.join(normalize)}{norm}")
         if prev is None:
             initial_gap = max(0.0, float(c["start"]))
             if initial_gap > 1.0 / FPS:
                 gap = f"[bgap{i}]"
                 out = f"[v{i}]"
-                fc.append(f"color=c=black:s={canvas['width']}x{canvas['height']}:r={FPS}:d={initial_gap:.6f},format=yuv420p{gap}")
+                fc.append(f"color=c=black:s={canvas['width']}x{canvas['height']}:r={FPS}:d={initial_gap:.6f},format=gbrp{gap}")
                 fc.append(f"{gap}{norm}concat=n=2:v=1:a=0{out}")
                 prev = out
                 combined = initial_gap + base_durs[i]
@@ -507,12 +560,12 @@ def export_project(project, root):
         tname = TRANSITIONS.get(ttype, TRANSITIONS["cut"])[0]
         tdur = float(tr.get("dur", TRANSITIONS.get(ttype, TRANSITIONS["cut"])[1]))
         out = f"[v{i}]"
-        if ttype == "cut" or tdur <= 0:
+        if ttype == "cut" or tdur <= 0 or not adjacent:
             gap_seconds = max(0.0, float(c["start"]) - combined)
             if gap_seconds > 1.0 / FPS:
                 gap = f"[bgap{i}]"
                 filled = f"[vfill{i}]"
-                fc.append(f"color=c=black:s={canvas['width']}x{canvas['height']}:r={FPS}:d={gap_seconds:.6f},format=yuv420p{gap}")
+                fc.append(f"color=c=black:s={canvas['width']}x{canvas['height']}:r={FPS}:d={gap_seconds:.6f},format=gbrp{gap}")
                 fc.append(f"{prev}{gap}concat=n=2:v=1:a=0{filled}")
                 fc.append(f"{filled}{norm}concat=n=2:v=1:a=0{out}")
                 combined += gap_seconds + base_durs[i]
@@ -520,10 +573,13 @@ def export_project(project, root):
                 fc.append(f"{prev}{norm}concat=n=2:v=1:a=0{out}")
                 combined += base_durs[i]
         else:
-            # keep the transition fully inside the running stream
-            tdur = min(tdur, max(0.05, combined - 0.05))
-            offset = combined - tdur
-            fc.append(f"{prev}{norm}xfade=transition={tname}:duration={tdur:.3f}:offset={offset:.3f}{out}")
+            # Hold the outgoing final frame after its authored endpoint. Blend
+            # during the incoming clip's opening window; never consume time.
+            tdur = min(tdur, _clip_dur(c))
+            offset = float(c["start"])
+            held = f"[hold{i}]"
+            fc.append(f"{prev}tpad=stop_mode=clone:stop_duration={tdur+1/FPS:.9f}{held}")
+            fc.append(f"{held}{norm}xfade={_join_transition(ttype)}:duration={tdur:.9f}:offset={offset:.9f}{out}")
             combined = offset + base_durs[i]
         prev = out
     base_label = prev
@@ -538,7 +594,7 @@ def export_project(project, root):
 
     # overlay upper video tracks
     cur = base_label
-    for t in vtracks:
+    for t in reversed(vtracks):
         if t is base:
             continue
         for c in sorted(t["clips"], key=lambda c: c["start"]):
@@ -548,73 +604,34 @@ def export_project(project, root):
             b = c["start"] + clip_dur
             out = f"[o{c['id']}]"
             overlay_in = f"[ov{c['id']}]"
-            overlay_filters = ["format=rgba"]
+            W, H = canvas["width"], canvas["height"]
+            pos = c.get("position") or {}
+            dx, dy = W * float(pos.get("x", 0) or 0) / 100, H * float(pos.get("y", 0) or 0) / 100
+            # Compose into a transparent full-canvas layer before applying masks
+            # and edge geometry, exactly as the browser does.
+            overlay_filters = ["format=rgba",
+                f"pad=w='max(iw,{W+2*abs(dx):.6f})':h='max(ih,{H+2*abs(dy):.6f})':x=(ow-iw)/2:y=(oh-ih)/2:color=black@0",
+                f"crop={W}:{H}:(iw-{W})/2-({dx:.6f}):(ih-{H})/2-({dy:.6f})"]
             mask_condition = _mask_condition(c, canvas)
             if mask_condition:
                 overlay_filters.append(
                     "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(" + mask_condition + ")'")
             overlay_filters.append("format=yuva420p")
-            fade_in = _transition_duration(c, "start")
-            fade_out = _transition_duration(c, "end")
-            if fade_in > 0:
-                overlay_filters.append(f"fade=t=in:st=0:d={fade_in:.6f}:alpha=1")
-            if fade_out > 0:
-                overlay_filters.append(f"fade=t=out:st={max(0.0, clip_dur-fade_out):.6f}:d={fade_out:.6f}:alpha=1")
+            overlay_filters += _edge_vf(c, "start", alpha=True) + _edge_vf(c, "end", alpha=True)
             overlay_filters.append(f"setpts=PTS-STARTPTS+{a:.6f}/TB")
             fc.append(f"[{idx}:v]{','.join(overlay_filters)}{overlay_in}")
             pos = c.get("position") or {}
             x = float(pos.get("x", 0) or 0) / 100.0
             y = float(pos.get("y", 0) or 0) / 100.0
-            fc.append(f"{cur}{overlay_in}overlay=x=(W-w)/2+W*{x:.6f}:y=(H-h)/2+H*{y:.6f}:"
+            fc.append(f"{cur}{overlay_in}overlay=x=0:y=0:"
                       f"enable='between(t,{a:.3f},{b:.3f})':shortest=0{out}")
             cur = out
-    video_out = cur
+    fc.append(f"{cur}fps={FPS}:start_time=0,tpad=stop_mode=clone:stop_duration=1,trim=duration={math.ceil(total*FPS)/FPS:.9f},settb=1/{FPS},setpts=N[videoFinal]")
+    video_out = "[videoFinal]"
 
-    # audio
-    # Base-track audio is chained to mirror the video chain exactly (concat for
-    # cuts, acrossfade for transitions). Placing it at original timeline offsets
-    # with adelay+amix drifts out of sync once xfade compresses the video.
-    base_audio_ids = set()
-    if not base.get("muted"):
-        for c in sorted(base_clips, key=lambda c: c["start"]):
-            m = media[c["mediaId"]]
-            if c.get("detached") or c.get("muted"):
-                continue
-            if _is_image(m["src"]) or not m.get("hasAudio"):
-                continue
-            if not (pre / f"{c['id']}.m4a").exists():
-                render_audio_pre(c, m, pre)
-            base_audio_ids.add(c["id"])
-
-    base_audio_label = None
-    if base_audio_ids:
-        prev = None
-        for c in sorted(base_clips, key=lambda c: c["start"]):
-            if c["id"] not in base_audio_ids:
-                continue
-            idx = add_input(pre / f"{c['id']}.m4a")
-            tr = _transition_for(c, "start")
-            ttype = tr.get("type", "cut")
-            tdur = float(tr.get("dur", TRANSITIONS.get(ttype, TRANSITIONS["cut"])[1]))
-            out = f"[ba{c['id']}]"
-            if prev is None:
-                prev = f"[{idx}:a]"
-                continue
-            if ttype == "cut" or tdur <= 0:
-                fc.append(f"{prev}[{idx}:a]concat=n=2:v=0:a=1{out}")
-            else:
-                tdur = min(tdur, 1.0)
-                fc.append(f"{prev}[{idx}:a]acrossfade=d={tdur:.3f}:c1=tri:c2=tri{out}")
-            prev = out
-        base_audio_label = prev
-
-    # Independent audio-track clips (A1, A2, ...) placed at their timeline offset.
+    # Audio stays at the authored timestamps, including silent clips and gaps.
     audio_items = []
-    # Upper video lanes carry audio in the browser preview too. Keep those
-    # sources at their absolute positions instead of silently dropping them.
     for t in vtracks:
-        if t is base:
-            continue
         for c in sorted(t["clips"], key=lambda c: c["start"]):
             m = media[c["mediaId"]]
             if c.get("detached") or c.get("muted") or _is_image(m["src"]) or not m.get("hasAudio"):
@@ -634,8 +651,6 @@ def export_project(project, root):
             audio_items.append((c["start"], pre / f"{c['id']}.m4a", bool(c.get("muted"))))
 
     mix_labels = []
-    if base_audio_label:
-        mix_labels.append(base_audio_label)
     ainputs = []
     for i, (start, f, muted) in enumerate(audio_items):
         if muted:
@@ -678,7 +693,7 @@ def export_project(project, root):
     cmd += ["-map", video_map]
     if audio_map:
         cmd += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k"]
-    cmd += ["-t", f"{video_dur:.3f}", "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+    cmd += ["-r", str(FPS), "-fps_mode", "cfr", "-t", f"{video_dur:.3f}", "-c:v", "libx264", "-crf", "18", "-preset", "medium",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_mp4)]
     r = run(cmd)
     if r.returncode != 0 or not out_mp4.exists():

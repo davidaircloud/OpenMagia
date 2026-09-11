@@ -32,6 +32,16 @@ OpenMagia would not exist without them.
 - Role: optional ~1 GB local model that expands the user's prose before
   deterministic H3 formatting wraps it.
 
+### YuE 2 song generation
+- Upstream: <https://github.com/multimodal-art-projection/YuE>
+- Models: `m-a-p/YuE2-3B` (7.3 GB) and `m-a-p/YuE2-Vae` (0.53 GB)
+- License: runtime code Apache License 2.0; model weights CC BY-NC 4.0 — Copyright Multimodal Art Projection (m-a-p)
+- Role: optional music backend. OpenMagia drives the upstream `yue2` CLI through
+  its own worker (`yue_worker.py`) and compiles requests with `yue_prompts.py`;
+  the upstream source is used unmodified as an installed package.
+- Note: OpenMagia runs the documented `--backend torch-eager` path. The CUDA-only
+  accelerations (`vllm`, flash/quantized kernels) are not used on Apple Silicon.
+
 ### MiniMax-H3 checkpoints
 - Source: <https://huggingface.co/MiniMaxAI/MiniMax-H3>
 - Copyright © MiniMax AI. The checkpoints are downloaded at install time and

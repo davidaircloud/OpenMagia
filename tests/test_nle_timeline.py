@@ -139,7 +139,7 @@ class TimelineCompositionTests(unittest.TestCase):
         graph = final[final.index("-filter_complex") + 1]
         self.assertIn("d=0.250000", graph)
         self.assertIn("tpad=stop_mode=add:stop_duration=1.500000", graph)
-        self.assertIn("fade=t=out:st=0.774000:d=1.226000:alpha=1", graph)
+        self.assertIn("clip((2.000000000-T)/1.226000000,0,1)", graph)
         self.assertIn("a='alpha(X,Y)*(lte(", graph)
 
     def test_project_library_exposes_creation_and_modified_dates(self):
@@ -794,6 +794,75 @@ class TimelineCompositionTests(unittest.TestCase):
         ]
         self.assertEqual(nle._base_video_track(tracks)["id"], "top")
 
+    def test_latest_transition_wins_even_when_shorter_and_bypass_reveals_previous(self):
+        clip = {"transition": {"items": [
+            {"id": "old", "type": "wipe", "dur": 1.2},
+            {"id": "new", "type": "fade", "dur": .2},
+        ]}}
+        self.assertEqual(nle._transition_for(clip)["id"], "new")
+        clip["transition"]["items"][-1]["enabled"] = False
+        self.assertEqual(nle._transition_for(clip)["id"], "old")
+
+    def test_builtin_recipes_keep_distinct_looks_without_ai_reinterpretation(self):
+        project = self._timeline_magia_project()
+        with mock.patch.object(server, "formatter_available", return_value=True), mock.patch.object(server, "run_formatter_command") as formatter:
+            social = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "social", "use_ai": True})
+            cinematic = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "cinematic", "use_ai": True})
+        formatter.assert_not_called()
+        social_clip = next(item["fields"] for item in social["updates"] if item.get("clip_id") == "c2")
+        cinema_clip = next(item["fields"] for item in cinematic["updates"] if item.get("clip_id") == "c2")
+        self.assertGreater(social_clip["color"]["saturation"] - cinema_clip["color"]["saturation"], .4)
+        self.assertGreater(social_clip["color"]["exposure"], cinema_clip["color"]["exposure"])
+        self.assertGreater(cinema_clip["transition"]["items"][-1]["dur"], social_clip["transition"]["items"][-1]["dur"] * 2)
+        # Authored direction continues to take precedence over a built-in look.
+        custom = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "social", "direction": "sepia"})
+        self.assertGreater(custom["updates"][0]["fields"]["color"]["temperature"], .4)
+
+    def test_recipe_replacement_does_not_compound_trims(self):
+        project = self._timeline_magia_project()
+        request = {"seed": 91, "recipe_id": "cinematic"}
+        first = server.timeline_magia_plan(project, request)
+        server.apply_timeline_magia_plan(project, first)
+        second = server.timeline_magia_plan(project, request)
+        self.assertEqual(first["updates"], second["updates"])
+        replacement = server.timeline_magia_plan(project, {**request, "recipe_id": "narrative"})
+        fresh = server.timeline_magia_plan(self._timeline_magia_project(), {**request, "recipe_id": "narrative"})
+        self.assertEqual(replacement["updates"], fresh["updates"])
+
+    def test_selected_recipe_preserves_other_generated_overlays(self):
+        project = self._timeline_magia_project()
+        project["tracks"][1]["clips"] = []
+        server.apply_timeline_magia_plan(project, server.timeline_magia_plan(project, {"seed": 30}))
+        overlays = json.loads(json.dumps(project["tracks"][1]["clips"]))
+        self.assertTrue(overlays)
+        request = {"seed": 32, "scope": "selected", "selected_clip_id": "c1", "recipe_id": "narrative"}
+        plan = server.timeline_magia_plan(project, request)
+        self.assertEqual({item["clip_id"] for item in plan["updates"]}, {"c1"})
+        server.apply_timeline_magia_plan(project, plan)
+        self.assertEqual(project["tracks"][1]["clips"], overlays)
+        # Selecting a generated overlay edits that actual clip rather than silently skipping it.
+        plan = server.timeline_magia_plan(project, {**request, "selected_clip_id": overlays[0]["id"]})
+        self.assertEqual({item["clip_id"] for item in plan["updates"]}, {overlays[0]["id"]})
+
+    def test_invalid_selected_recipe_never_falls_back_to_whole_timeline(self):
+        with self.assertRaises(ValueError):
+            server.timeline_magia_plan(self._timeline_magia_project(), {"scope": "selected", "selected_clip_id": "missing"})
+
+    def test_restore_one_effect_preserves_other_effects_and_manual_transitions(self):
+        project = self._timeline_magia_project()
+        clip = project["tracks"][0]["clips"][1]
+        clip["color"] = {"saturation": .8}
+        clip["transition"] = {"items": [{"id": "manual-old", "type": "wipe", "dur": .8}]}
+        server.apply_timeline_magia_plan(project, server.timeline_magia_plan(project, {"seed": 40}))
+        motion = json.loads(json.dumps(clip["keyframes"]))
+        clip["transition"]["items"].append({"id": "manual-new", "type": "fade", "dur": .2})
+        self.assertTrue(server.restore_magia_effects(clip, ["color"]))
+        self.assertEqual(clip["color"], {"saturation": .8})
+        self.assertEqual(clip["keyframes"], motion)
+        self.assertNotIn("color", clip["magiaEffects"])
+        server.restore_magia_effects(clip, ["transitions"])
+        self.assertEqual([item["id"] for item in clip["transition"]["items"]], ["manual-old", "manual-new"])
+
     def test_current_transition_items_are_read(self):
         clip = {"transition": {"items": [
             {"type": "fade", "edge": "start", "dur": .3, "enabled": True},
@@ -951,7 +1020,7 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertGreaterEqual(first["summary"]["transitions"], 3)
         self.assertEqual(first["summary"]["overlays"], 1)
         allowed = {"start", "in", "out", "zoom", "position", "motion", "keyframes", "color",
-                   "blur", "mask", "audioFade", "volume", "transition", "muted"}
+                   "blur", "mask", "audioFade", "audioProcessing", "volume", "transition", "muted"}
         for update in first["updates"]:
             self.assertLessEqual(set(update["fields"]), allowed)
         overlay = next(item for item in first["updates"] if item["clip_id"] == "o1")
@@ -960,7 +1029,38 @@ class TimelineCompositionTests(unittest.TestCase):
         base = next(item for item in first["updates"] if item["clip_id"] == "c2")
         self.assertTrue(base["fields"]["keyframes"]["enabled"])
         self.assertGreaterEqual(len(base["fields"]["keyframes"]["points"]), 3)
-        self.assertTrue(any("zoom" in change for change in base["changes"]))
+        self.assertTrue(any("reframe" in change for change in base["changes"]))
+
+    def test_export_audio_processing_uses_typed_voice_and_loudness_filters(self):
+        commands = []
+        def fake_run(command):
+            commands.append(command)
+            Path(command[-1]).touch()
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+        clip = {"id": "voice", "in": 0, "out": 4, "volume": 1,
+                "audioProcessing": {"voice": True, "denoise": True, "compress": True,
+                                    "loudness": True, "target_lufs": -16, "true_peak": -1.5}}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run):
+            source = Path(tmp) / "voice.wav"; source.touch()
+            nle.render_audio_pre(clip, {"src": str(source)}, tmp)
+        filters = commands[0][commands[0].index("-af") + 1]
+        self.assertIn("highpass=f=80", filters)
+        self.assertIn("afftdn=nf=-25", filters)
+        self.assertIn("acompressor=", filters)
+        self.assertIn("loudnorm=I=-16.0:TP=-1.5:LRA=11", filters)
+
+    def test_timeline_magia_plans_voice_cleanup_and_loudness_when_enabled(self):
+        project = self._timeline_magia_project()
+        plan = server.timeline_magia_plan(project, {"seed": 7, "recipe_id": "narrative",
+            "options": {"transitions": False, "transforms": False, "color": False,
+                        "pacing": False, "overlays": False, "audio": False,
+                        "audio_cleanup": True, "loudness": True}})
+        self.assertGreater(plan["summary"]["audio_cleanup"], 0)
+        self.assertGreater(plan["summary"]["loudness"], 0)
+        processing = plan["updates"][0]["fields"]["audioProcessing"]
+        self.assertTrue(processing["voice"])
+        self.assertTrue(processing["loudness"])
+        self.assertEqual(processing["target_lufs"], -16.0)
 
     def test_timeline_magia_direction_adapts_the_color_story(self):
         project = self._timeline_magia_project()
@@ -972,6 +1072,24 @@ class TimelineCompositionTests(unittest.TestCase):
         for update in plan["updates"]:
             self.assertGreaterEqual(update["fields"]["color"]["saturation"], 1.3)
             self.assertTrue(any("saturated color" in change for change in update["changes"]))
+
+    def test_timeline_magia_recipes_produce_distinct_bounded_edits(self):
+        project = self._timeline_magia_project()
+        project["tracks"][1]["clips"] = []
+        subtle = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "subtle"})
+        social = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "social"})
+        self.assertEqual(subtle["profile"], "Subtle continuity")
+        self.assertEqual(social["profile"], "Social energy")
+        self.assertEqual(subtle["summary"]["overlays"], 0)
+        self.assertGreater(social["summary"]["overlays"], subtle["summary"]["overlays"])
+        subtle_trim = sum(max(0, 5 - item["fields"].get("out", 5)) for item in subtle["updates"] if item.get("clip_id"))
+        social_trim = sum(max(0, 5 - item["fields"].get("out", 5)) for item in social["updates"] if item.get("clip_id"))
+        self.assertGreater(social_trim, subtle_trim)
+        applied = server.apply_timeline_magia_plan(project, social)
+        self.assertGreater(applied, 0)
+        self.assertEqual(project["timelineMagia"]["recipe_id"], "social")
+        self.assertEqual(project["timelineMagia"]["profile"], "Social energy")
+        self.assertEqual(project["timelineMagia"]["direction"], "")
 
     def test_timeline_magia_sepia_direction_is_visible_and_controlled(self):
         project = self._timeline_magia_project()
