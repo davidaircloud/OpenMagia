@@ -94,8 +94,8 @@ function applyProjectLayout(){
   if(!state||!state.slug||appliedLayoutSlug===state.slug)return;timelineViewSeconds=0;let local={};try{local=JSON.parse(localStorage.getItem(layoutStorageKey())||'{}')}catch(_){}const layout={...(state.ui_layout||{}),...local};
   if(Number.isFinite(+layout.media_width))document.body.style.setProperty('--media-w',clamp(+layout.media_width,180,420)+'px');
   if(Number.isFinite(+layout.inspector_width))document.body.style.setProperty('--inspector-w',clamp(+layout.inspector_width,280,520)+'px');
-  if(Number.isFinite(+layout.timeline_height))document.body.style.setProperty('--timeline-h',clamp(+layout.timeline_height,120,window.innerHeight*.8)+'px');
-  if(Number.isFinite(+layout.timeline_zoom)){pxPerSec=clamp(+layout.timeline_zoom,20,400);if($('#zoomVal'))$('#zoomVal').textContent=(pxPerSec/100).toFixed(1)+'×';}
+  if(Number.isFinite(+layout.timeline_height))document.body.style.setProperty('--timeline-h',clamp(+layout.timeline_height,250,window.innerHeight*.8)+'px');
+  if(Number.isFinite(+layout.timeline_zoom)){pxPerSec=clamp(+layout.timeline_zoom,20,400);syncZoomUi();}
   if(Number.isFinite(+layout.lane_header_width)){LANE_OFFSET=clamp(+layout.lane_header_width,96,320);document.body.style.setProperty('--lane-head-w',LANE_OFFSET+'px');}
   if(['clip','transform','color','animate','transitions','effects'].includes(layout.inspector_clip_tab))inspectorClipTab=layout.inspector_clip_tab;
   const footer=$('#timeline');if(footer)footer.classList.toggle('maximized',!!layout.timeline_maximized);const maxBtn=$('#tlMaxBtn');if(maxBtn)maxBtn.classList.toggle('on',!!layout.timeline_maximized);if($('#tlMaxLabel'))$('#tlMaxLabel').textContent=layout.timeline_maximized?'Collapse':'Expand';
@@ -1200,6 +1200,11 @@ function renderMedia() {
       im.loading = 'lazy'; im.decoding = 'async'; im.src = mediaUrl(m);
       thumb.appendChild(im);
     }
+    else if (m.kind === 'audio') {
+      const icon = document.createElement('span');
+      icon.className = 'audioThumb'; icon.textContent = '\u266B'; icon.setAttribute('aria-hidden', 'true');
+      thumb.appendChild(icon); tile.classList.add('hasAudioThumb');
+    }
     else {
       const v = document.createElement('video');
       v.src = mediaUrl(m); v.muted = true; v.preload = 'metadata'; v.playsInline = true; v.loop = true;
@@ -1308,7 +1313,7 @@ function renderInspector({preserveScroll=false}={}) {
   // Background job polling calls renderAll repeatedly. Replacing an actively
   // playing preview destroys its media element and makes playback stop at the
   // next poll, so leave that inspector intact until the user pauses or it ends.
-  const playingPreview=$('.inspectorMediaPreview video',body);
+  const playingPreview=$('.inspectorMediaPreview video, .inspectorMediaPreview audio',body);
   if(preserveScroll&&playingPreview&&!playingPreview.paused&&!playingPreview.ended)return;
   const priorPrompt=$('.sceneSourcePrompt',body),promptState=priorPrompt?{scrollTop:priorPrompt.scrollTop,start:priorPrompt.selectionStart,end:priorPrompt.selectionEnd}:null;
   const openProvenance=new Set($$('.promptProvenance[open]',body).map(node=>node.dataset.provenance));
@@ -1355,6 +1360,7 @@ function renderMediaInsp(body, hint, id) {
   body.appendChild(f);
   const preview=div('inspectorMediaPreview');
   if(m.kind==='image'){const image=document.createElement('img');image.src=mediaUrl(m);image.alt=m.name;preview.appendChild(image);}
+  else if(m.kind==='audio'){const audio=document.createElement('audio');audio.src=mediaUrl(m);audio.controls=true;audio.preload='metadata';preview.appendChild(audio);}
   else{const video=document.createElement('video');video.src=mediaUrl(m);video.controls=true;video.muted=true;video.playsInline=true;if(m.thumb)video.poster=mediaPathUrl(m.thumb);preview.appendChild(video);}
   body.appendChild(preview);
   const actions=div('inspectorMediaActions');const reveal=document.createElement('button');reveal.className='btn ghost';reveal.textContent=navigator.platform.toLowerCase().includes('mac')?'Reveal in Finder':'Show in explorer';reveal.addEventListener('click',()=>revealMediaFile(m));
@@ -1378,11 +1384,13 @@ function renderSceneInsp(body, hint, id) {
   const sc = state.scenes.find(x => x.id === id);
   if (!sc) { sel = null; return renderInspector(); }
   hint.textContent = '';
+  const isMusic=sc.generation_type==='music';
   body.classList.add('sceneInspector');
   if(['queued','running'].includes(sc.status))body.appendChild(generationProgressField(sc));
   if(sc.status==='error')body.appendChild(generationErrorField(sc));
   body.appendChild(inspectorNameField(sc.name,name=>api('/api/scenes/'+sc.id,{method:'PUT',body:{name}}).then(refresh).catch(e=>toast(e.message,'err'))));
   const sceneMedia=mediaById(sc.mediaId);if(sceneMedia)body.appendChild(revealMediaField(sceneMedia));
+  if(isMusic&&sceneMedia&&sceneMedia.kind==='audio'){const preview=div('inspectorMediaPreview');const audio=document.createElement('audio');audio.src=mediaUrl(sceneMedia);audio.controls=true;audio.preload='metadata';preview.appendChild(audio);body.appendChild(preview);}
 
   // Editable source plus immutable execution provenance.
   const pf = div('field scenePromptField'); const pl = document.createElement('label'); pl.textContent = 'Source prompt'; pf.appendChild(pl);
@@ -1393,10 +1401,10 @@ function renderSceneInsp(body, hint, id) {
   for(const [label,value] of provenance){if(!value||value===sc.prompt)continue;const details=document.createElement('details');details.className='field promptProvenance';details.dataset.provenance=label;const summary=document.createElement('summary');summary.textContent=label;const text=document.createElement('pre');text.textContent=value;details.append(summary,text);body.appendChild(details);}
   if(sc.skill_compilation&&sc.skill_compilation.id){const meta=div('d promptCompileMeta');meta.textContent='Skill: '+(sc.skill_compilation.name||sc.skill_compilation.id)+' · contract '+sc.skill_compilation.version+(sc.formatter_model?' · refinement '+sc.formatter_model:'');body.appendChild(meta);}
 
-  body.appendChild(sceneReferenceField(sc));
+  if(!isMusic)body.appendChild(sceneReferenceField(sc));
   // style that was chained in (project-level)
   const projectStyle = state.style_profile && state.style_profile.prompt || state.base_prompt || '';
-  if (projectStyle) {
+  if (!isMusic && projectStyle) {
     const sf = div('field'); const sl = document.createElement('label'); sl.textContent = 'Style (chained into every scene)'; sf.appendChild(sl);
     const sd = div('d'); sd.style.cssText = 'font-size:12px;color:var(--muted);line-height:1.5'; sd.textContent = projectStyle;
     sf.appendChild(sd); body.appendChild(sf);
@@ -1423,10 +1431,10 @@ function renderSceneInsp(body, hint, id) {
     });
     cc.appendChild(b);
   }
-  cf.appendChild(cc); body.appendChild(cf);
+  cf.appendChild(cc); if(!isMusic)body.appendChild(cf);
 
   // first / last frame stills
-  if ((!sceneMedia || sceneMedia.kind !== 'image') && (sc.first_frame || sc.last_frame)) {
+  if (!isMusic && (!sceneMedia || sceneMedia.kind !== 'image') && (sc.first_frame || sc.last_frame)) {
     const ff = div('field'); const fl = document.createElement('label'); fl.textContent = 'Frames'; ff.appendChild(fl);
     const wrap = div('sframes');
     if (sc.first_frame) { const b = document.createElement('button'); b.className = 'sframe'; b.title = 'Extract first frame to media'; b.innerHTML = '<img src="' + esc(sc.first_frame) + '"><span>first</span>'; b.addEventListener('click', () => extractSceneFrame(sc, 'first')); wrap.appendChild(b); }
@@ -1453,7 +1461,7 @@ function renderSceneInsp(body, hint, id) {
     ' · Steps: ' + (sc.params && sc.params.steps) + ((!sceneMedia || sceneMedia.kind !== 'image') ? ' · Frames: ' + (sc.params && sc.params.frames) : '') +
     (sc.chain ? '<br>Chains from previous: yes' : '');
   body.appendChild(d);
-  if(sceneMedia)body.appendChild(continuityStyleUpdateField(sceneMedia.id));
+  if(sceneMedia&&!isMusic)body.appendChild(continuityStyleUpdateField(sceneMedia.id));
 }
 
 const generationEstimates=new Map();
@@ -2047,7 +2055,8 @@ function renderComposerPicker() {
     for (const skill of [...customSkills(),...SKILL_CATALOG].filter(s => (musicSkillMode?s.type==='music':s.type!=='music') && (s.name + ' ' + s.id + ' ' + s.description).toLowerCase().includes(q))) {
       const selected=musicSkillMode?musicSkillId===skill.id:activePromptSkill&&activePromptSkill.id===skill.id;
       const b = document.createElement('button'); b.className = 'pickerRow skillPickerRow' + (selected ? ' on' : '');
-      b.innerHTML = '<span class="skillPickerPreview'+(skill.custom?' customSkillArt':'')+'">'+skillPreviewMarkup(skill,'picker')+'</span><span><strong>' + esc(skill.name) + ' <code>/' + esc(skill.id) + '</code></strong><small>' + esc(skill.description) + '</small></span><em>'+(skill.custom?'Custom':'Prompt')+'</em>';
+      const preview=musicSkillMode?'<span class="musicSkillThumb" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 17.5a3 3 0 1 1-2-2.83V7l10-2v9.5a3 3 0 1 1-2-2.83V8L9 9.2z"/></svg></span>':skillPreviewMarkup(skill,'picker');
+      b.innerHTML = '<span class="skillPickerPreview'+(skill.custom?' customSkillArt':'')+'">'+preview+'</span><span><strong>' + esc(skill.name) + ' <code>/' + esc(skill.id) + '</code></strong><small>' + esc(skill.description) + '</small></span><em>'+(skill.custom?'Custom':'Prompt')+'</em>';
       bindSkillPreviewFallback(b);
       b.addEventListener('click', () => { closeComposerPicker(); openSkillDetail(skill, 'prompt-picker'); }); wrap.appendChild(b);
     }
@@ -2463,7 +2472,7 @@ function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal')
     abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
     seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
 function closeMusicLyricsSheet(){const sheet=$('#musicLyricsSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
-async function openMusicLyricsSheet(){const idea=$('#musicPrompt').value.trim(),lyrics=$('#musicLyrics').value.trim();if(!idea&&!lyrics){toast('Describe the song first','err');return;}
+async function openMusicLyricsSheet(){const params=musicComposerParams();if(params.instrumental){toast('No lead vocal is selected, so there are no words to write. Switch Voice to "Lead vocal" to add lyrics.','warn');return;}const idea=$('#musicPrompt').value.trim(),lyrics=$('#musicLyrics').value.trim();if(!idea&&!lyrics){toast('Describe the song first','err');return;}
   const button=$('#musicLyricsRefineBtn');button.disabled=true;button.textContent=lyrics?'Refining…':'Writing…';
   try{const out=await api('/api/music/refine',{method:'POST',body:{action:'lyrics',prompt:idea,lyrics,prompt_skill_id:musicSkillId}});$('#musicLyricsDraft').value=out.lyrics;$('#musicLyricsTitle').textContent=lyrics?'Review refined lyrics':'Review lyric draft';const sheet=$('#musicLyricsSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#musicLyricsDraft').focus();}
   catch(error){toast(error.message,'err');}finally{button.disabled=false;button.textContent=lyrics?'✦ Refine lyrics':'✦ Write with model';}}
@@ -2496,8 +2505,9 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
 function bindMusicComposer(){if(musicBound)return;musicBound=true;
   ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';compileMusicPreview(false);});});
   const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
-  const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{refine.disabled=true;refine.textContent='Refining…';try{const out=await api('/api/music/refine',{method:'POST',body:{prompt:$('#musicPrompt').value,lyrics:$('#musicLyrics').value,prompt_skill_id:musicSkillId}});$('#musicPrompt').value=out.style||$('#musicPrompt').value;$('#musicLyrics').value=out.lyrics||$('#musicLyrics').value;toast(out.used_ai?'Music direction refined':'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
-  const manage=$('#musicManageBtn');if(manage)manage.addEventListener('click',()=>setHubView('settings'));
+  const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
+  // reply like "Instrumental" must never overwrite the artist's full description.
+  if(refined && refined.length >= Math.min(originalLen||refined.length,80))$('#musicPrompt').value=refined;if(out.instrumental!=null)$('#musicVocal').value=out.instrumental?'instrumental':'lead';if(['full','melody','off'].includes(out.plan_mode))$('#musicPlan').value=out.plan_mode;toast(out.used_ai?(out.instrumental?'Instrumental direction refined':'Music direction refined'):'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
   const skills=$('#musicSkillBtn');if(skills)skills.addEventListener('click',()=>openComposerPicker('music-skills'));
   $('#musicLyricsRefineBtn').addEventListener('click',event=>{event.preventDefault();openMusicLyricsSheet();});
   $('#musicLyricsScrim').addEventListener('click',closeMusicLyricsSheet);$('#musicLyricsClose').addEventListener('click',closeMusicLyricsSheet);$('#musicLyricsCancel').addEventListener('click',closeMusicLyricsSheet);
@@ -3511,11 +3521,18 @@ function extractFrameAtPlayhead() {
     .catch(e => toast(e.message, 'err'));
 }
 
-function zoomTimeline(dir) {
-  pxPerSec = clamp(pxPerSec * (dir > 0 ? 1.25 : 0.8), 20, 400);
-  $('#zoomVal').textContent = (pxPerSec / 100).toFixed(1) + '×';
+function syncZoomUi() {
+  const s = $('#zoomSlider'); if (s) { s.value = pxPerSec; s.style.setProperty('--zoom-fill', (((pxPerSec - 20) / (400 - 20)) * 100).toFixed(1) + '%'); }
+  const v = $('#zoomVal'); if (v) v.textContent = (pxPerSec / 100).toFixed(1) + '×';
+}
+function setZoom(px) {
+  pxPerSec = clamp(+px || 100, 20, 400);
+  syncZoomUi();
   renderTimeline();
   saveProjectLayout();
+}
+function zoomTimeline(dir) {
+  setZoom(pxPerSec * (dir > 0 ? 1.25 : 0.8));
 }
 
 /* ---------------- export ---------------- */
@@ -4118,6 +4135,8 @@ function bindEvents() {
   $('#detachAudioBtn').addEventListener('click',()=>{const c=sel&&sel.type==='clip'?findClip(sel.id):null;if(c)detachAudio(c,true);});
   $('#zoomIn').addEventListener('click', () => zoomTimeline(1));
   $('#zoomOut').addEventListener('click', () => zoomTimeline(-1));
+  const zoomSlider = $('#zoomSlider');
+  if (zoomSlider) { syncZoomUi(); zoomSlider.addEventListener('input', () => setZoom(+zoomSlider.value)); }
   $('#tlScroll').addEventListener('scroll',extendTimelineCanvas,{passive:true});
   // timeline resize + maximize
   const footer = $('#timeline');
@@ -4126,7 +4145,7 @@ function bindEvents() {
     e.preventDefault();
     const startY = e.clientY; const startH = footer.offsetHeight;
     resize.setPointerCapture && resize.setPointerCapture(e.pointerId);
-    const move = (ev) => { const h = clamp(startH + (startY - ev.clientY), 120, window.innerHeight * 0.8); document.body.style.setProperty('--timeline-h', h + 'px'); footer.classList.remove('maximized'); };
+    const move = (ev) => { const h = clamp(startH + (startY - ev.clientY), 250, window.innerHeight * 0.8); document.body.style.setProperty('--timeline-h', h + 'px'); footer.classList.remove('maximized'); };
     const up = () => {saveProjectLayout();window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
   });

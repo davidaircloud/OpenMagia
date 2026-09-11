@@ -188,6 +188,10 @@ class Registry(unittest.TestCase):
         self.assertNotIn('class="musicSkills"', html)
         self.assertNotIn('const musicCard=', script)
         self.assertIn("musicSkillMode", script)
+        self.assertIn('class="musicAdvanced"', html)
+        self.assertIn('class="sheetPanel modelUninstallPanel musicLyricsPanel"', html)
+        self.assertNotIn('id="musicManageBtn"', html)
+        self.assertIn("m.kind==='audio'", script)
 
 
 class Skills(unittest.TestCase):
@@ -211,6 +215,13 @@ class Skills(unittest.TestCase):
         self.assertFalse(result["used_ai"])
         self.assertEqual(result["lyrics"], "[Verse]\nKeep these words")
         self.assertIn("warm piano pop", result["style"])
+
+    def test_music_refiner_infers_instrumental_controls_from_plain_language(self):
+        with mock.patch.object(server, "formatter_available", return_value=False):
+            result = server.refine_music_brief("Lo-fi piano, instrumental, no lead vocal")
+        self.assertTrue(result["instrumental"])
+        self.assertEqual("off", result["plan_mode"])
+        self.assertEqual("[Instrumental]", result["lyrics"])
 
     def test_lyric_editor_drafts_and_revises_for_review(self):
         drafted = SimpleNamespace(returncode=0, stderr="", stdout='{"lyrics":"[Verse]\\nRoad home\\n[Chorus]\\nCarry me"}')

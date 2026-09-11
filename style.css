@@ -97,6 +97,7 @@ main{flex:1;display:flex;gap:18px;padding:0 22px;min-height:0}
 .mtile.sel{border-color:var(--ink)}
 .mtile .thumb{height:78px;background:#E7E1D6;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
 .mtile .thumb video,.mtile .thumb img{width:100%;height:100%;object-fit:cover}
+.mtile .thumb .audioThumb{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:800;color:#c6b3ff;background:linear-gradient(145deg,rgba(124,78,255,.28),rgba(124,78,255,.06))}
 .mtile.hasVideoPoster .thumb .videoPoster,.mtile.hasVideoPoster .thumb video{position:absolute;inset:0}
 .mtile.hasVideoPoster .thumb video{opacity:0;transition:opacity .12s}
 .mtile.hasVideoPoster.previewing .thumb video{opacity:1}
@@ -148,7 +149,7 @@ textarea.txt:focus{outline:none;border-color:var(--line-2);background:var(--surf
 .divider{height:1px;background:var(--line);margin:14px 0}
 
 /* ---------- timeline ---------- */
-footer{flex:0 0 auto;background:var(--tl);border-top:1px solid #000;padding:0 0 14px;height:230px;min-height:120px;max-height:80vh;display:flex;flex-direction:column}
+footer{flex:0 0 auto;background:var(--tl);border-top:1px solid #000;padding:0 0 14px;height:260px;min-height:120px;max-height:80vh;display:flex;flex-direction:column}
 footer.maximized{height:68vh}
 #tlResize{flex:0 0 auto;height:6px;cursor:ns-resize;background:transparent;position:relative;z-index:30}
 #tlResize::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:44px;height:3px;border-radius:3px;background:var(--tl-line);transition:.15s}
@@ -170,7 +171,7 @@ footer.maximized{height:68vh}
 #tlRuler .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--tl-line);pointer-events:none}
 #tlRuler .tick label{position:absolute;top:4px;left:4px;font-size:10px;color:var(--tl-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .tlrow{display:flex;align-items:stretch;border-bottom:1px solid var(--tl-line);min-height:56px}
-.tlrow.audio{min-height:44px}
+.tlrow.audio{min-height:66px}
 .tlhead{flex:0 0 92px;position:sticky;left:0;z-index:5;background:var(--tl-2);border-right:1px solid var(--tl-line);display:flex;flex-direction:column;justify-content:center;gap:3px;padding:0 12px}
 .tlhead .nm{font-size:12px;font-weight:700;color:var(--tl-ink);letter-spacing:.02em}
 .tlhead .ctl{display:flex;gap:4px}
@@ -188,9 +189,14 @@ footer.maximized{height:68vh}
 .clip.audio{background:linear-gradient(180deg,#4C8A62,var(--clip-a))}
 .clip .body{position:absolute;inset:0;display:flex;flex-direction:column;padding:5px 8px;pointer-events:none}
 .clip .body .cn{font-size:11px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.4)}
+.clip.audio .body .cn{position:relative;z-index:3;max-width:100%;padding-right:4px}
 .clip .body .cd{font-size:10px;color:rgba(255,255,255,.7);font-variant-numeric:tabular-nums}
-.clip.audio .body{align-items:flex-start;justify-content:center}
-.clip.audio .wave{position:absolute;inset:3px 4px;opacity:.72;overflow:hidden}
+.clip.audio .body{align-items:flex-start;justify-content:flex-start}
+.clip.audio .wave{position:absolute;left:4px;right:4px;top:20px;bottom:4px;opacity:.72;overflow:hidden}
+.tlZoom{align-items:center;gap:7px}
+.zoomSlider{-webkit-appearance:none;appearance:none;width:104px;height:4px;border-radius:3px;background:linear-gradient(90deg,var(--accent) 0%,var(--accent) var(--zoom-fill,25%),#3a3a40 var(--zoom-fill,25%),#3a3a40 100%);outline:none;cursor:pointer;margin:0}
+.zoomSlider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.4);cursor:grab}
+.zoomSlider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--accent);cursor:grab}
 .clip.audio .wave svg{display:block;width:100%;height:100%;fill:rgba(220,252,231,.82)}
 .clip.audio .wave::before,.clip.audio .wave::after{content:"";position:absolute;z-index:2;top:0;bottom:0;pointer-events:none}
 .clip.audio .wave::before{left:0;width:var(--fade-in);background:linear-gradient(90deg,rgba(8,40,22,.86),transparent)}
@@ -333,7 +339,7 @@ body.storyboardOpen #promptSheet{z-index:180}
    that restyle themselves. Keep it on the dark :root so nothing inherits a
    light native scrollbar. */
 :root{color-scheme:dark;--bg:#09090b;--bg-2:#111113;--surface:#161618;--ink:#fafafa;--ink-2:#d4d4d8;--muted:#71717a;--line:#27272a;--line-2:#3f3f46;--accent:#7c5cff;--accent-press:#6d4aef;--accent-soft:rgba(124,92,255,.13);--ok:#22c55e;--ok-soft:rgba(34,197,94,.12);--warn:#f59e0b;--warn-soft:rgba(245,158,11,.12);--err:#ef4444;--err-soft:rgba(239,68,68,.12);--r-lg:12px;--r:9px;--r-sm:7px;--sh:none;--sh-lg:0 24px 80px rgba(0,0,0,.55);--font:Inter,"SF Pro Text",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--serif:var(--font)}
-body{--timeline-h:230px;display:grid;grid-template-columns:224px minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) var(--timeline-h);background:var(--bg);font-size:13px}
+body{--timeline-h:260px;display:grid;grid-template-columns:224px minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) var(--timeline-h);background:var(--bg);font-size:13px}
 #globalSidebar{grid-column:1;grid-row:1/4;border-right:1px solid var(--line);background:#0d0d0f;padding:12px 10px;display:flex;flex-direction:column;min-height:0;z-index:35}
 .sideBrand{height:34px;display:flex;align-items:center;gap:9px;padding:0 8px;font-size:14px;font-weight:700;letter-spacing:-.01em}.brandGlyph{display:grid;place-items:center;width:22px;height:22px;background:var(--accent);border-radius:6px;color:#fff;font-size:12px}
 .sideCreate{margin:12px 2px 14px;padding:9px 11px;border:1px solid var(--line-2);background:var(--surface);border-radius:8px;text-align:left;font-weight:600}.sideCreate:hover{background:#202024}
@@ -1000,3 +1006,28 @@ footer.maximized{left:82px}
 .inlineRefine:hover{background:#27272a;color:#fff}
 #musicLyricsSheet .modelUninstallPanel{width:min(620px,94vw)}
 #musicLyricsDraft{width:100%;min-height:55vh;box-sizing:border-box;padding:14px;resize:vertical;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* Music follows the same full-width control rhythm as Video. */
+#musicGenerationControls .h3Composer{overflow:hidden}
+#musicGenerationControls .musicLyricsField,#musicGenerationControls .musicAbcField{width:auto;margin:0;padding:16px 18px;box-sizing:border-box}
+#musicGenerationControls .musicLyricsField{border-bottom:1px solid #27272a}
+#musicGenerationControls .musicGrid{display:grid;grid-template-columns:1fr;gap:16px;margin:0;padding:16px 18px;border-bottom:1px solid #27272a}
+#musicGenerationControls .musicGrid .field{display:grid;gap:8px;margin:0;min-width:0}
+#musicGenerationControls .musicGrid .field>label{display:flex;align-items:center;gap:7px;margin:0;color:#a1a1aa;font-size:12px;font-weight:650}
+#musicGenerationControls .musicGrid select,#musicGenerationControls .musicGrid input{display:block;width:100%;height:42px;min-width:0;box-sizing:border-box}
+#musicGenerationControls .musicGrid .slider-row{display:grid;grid-template-columns:minmax(0,1fr) 96px;gap:10px;align-items:stretch}
+#musicGenerationControls .musicGrid .slider-row .btn{width:96px;height:42px;min-height:42px;padding:0 12px;justify-content:center}
+#musicGenerationControls .musicAbcField>span{align-items:baseline;flex-wrap:wrap}
+#musicGenerationControls .musicAbcField>span em{margin-left:auto;color:#71717a;font-size:10px;font-weight:500;line-height:1.4;text-align:right}
+#musicGenerationControls .musicAbcField textarea{min-height:132px;margin-top:2px}
+#musicGenerationControls .musicAbcField small{display:block;margin:2px 0 0;color:#71717a;font-size:10px;line-height:1.55;overflow-wrap:anywhere}
+.musicAdvanced{border-bottom:1px solid #27272a}
+.musicAdvanced>summary{padding:14px 18px;color:#a1a1aa;font-size:12px;font-weight:650;cursor:pointer;list-style-position:inside}
+.musicAdvanced[open]>summary{border-bottom:1px solid #27272a}
+.musicLyricsPanel{position:absolute;top:0;right:0;bottom:0;display:flex;flex-direction:column;transform:translateX(102%)}
+#musicLyricsSheet.on .musicLyricsPanel{transform:translateX(0)}
+.musicLyricsPanel .sheetPanelBody{flex:1;min-height:0}
+.inspectorMediaPreview audio{display:block;width:100%;margin:4px 0 10px}
+.skillPickerPreview:has(.musicSkillThumb){display:grid;place-items:center;overflow:hidden;background:#18181b;border:1px solid #303036}
+.musicSkillThumb{display:grid;width:100%;height:100%;place-items:center;color:#d6a5ff}
+.musicSkillThumb svg{display:block;width:28px;height:28px;overflow:visible;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}

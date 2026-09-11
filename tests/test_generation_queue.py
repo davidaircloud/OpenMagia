@@ -37,6 +37,29 @@ class GenerationQueueTests(unittest.TestCase):
         self.assertEqual("engine failed", project["media"][0]["error"])
         self.assertFalse(server.repair_generation_placeholders(project))
 
+    def test_music_placeholder_is_audio(self):
+        project = {"scenes": [{"id": "song-1", "name": "Song", "status": "error",
+                                "generation_type": "music", "params": {}}], "media": []}
+        self.assertTrue(server.repair_generation_placeholders(project))
+        self.assertEqual("audio", project["media"][0]["kind"])
+
+    def test_ready_generation_replaces_stale_duplicate_without_losing_clip(self):
+        project = {"slug": "test", "scenes": [], "media": [
+            {"id": "stale", "scene_id": "song-1", "status": "running", "src": ""},
+            {"id": "ready", "scene_id": "song-1", "status": "ready", "src": "media/song.flac"},
+        ], "tracks": [{"id": "a1", "kind": "audio", "clips": [
+            {"id": "clip-1", "sceneId": "song-1", "mediaId": "stale"}]}]}
+        self.assertTrue(server.repair_generation_media_integrity(project))
+        self.assertEqual(["ready"], [item["id"] for item in project["media"]])
+        self.assertEqual("ready", project["tracks"][0]["clips"][0]["mediaId"])
+
+    def test_legacy_failed_music_card_is_typed_as_audio(self):
+        project = {"slug": "test", "scenes": [{"id": "song-1", "generation_type": "music"}],
+                   "media": [{"id": "failed", "scene_id": "song-1", "kind": "video",
+                              "status": "error", "src": ""}], "tracks": []}
+        self.assertTrue(server.repair_generation_media_integrity(project))
+        self.assertEqual("audio", project["media"][0]["kind"])
+
     def test_already_queued_scene_still_gets_media_placeholder(self):
         scene = {
             "id": "scene-1", "name": "Scene 1", "status": "queued",

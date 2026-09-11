@@ -174,12 +174,12 @@
             <div class="field"><label>Seed <span class="info" tabindex="0" role="img" aria-label="About the seed" data-tooltip="Same description, lyrics and seed reproduce the same take. New seed, new arrangement.">i</span></label>
               <div class="slider-row"><input class="txt" type="number" id="musicSeed" value="4242" min="0" step="1" inputmode="numeric"><button id="musicRandom" class="btn ghost sm" title="New seed, same song">Random</button></div></div>
           </div>
-          <label class="fld"><span>ABC score <em>(optional — a motif to develop)</em></span>
-            <textarea class="txt" id="musicAbc" rows="3" spellcheck="false" placeholder="X:1&#10;Q:1/4=92&#10;K:Dm&#10;|: d2 f2 e2 c2 :|"></textarea>
-            <small>Also where a real melody belongs: cover a tune, keep a theme from your project, or fix the mode a no-words piece would otherwise wander in.</small>
-          </label>
+          <details class="musicAdvanced"><summary>Advanced</summary><div class="fld musicAbcField"><span>ABC score <em>Optional motif</em></span>
+            <textarea class="txt" id="musicAbc" rows="3" spellcheck="false" aria-label="ABC score" placeholder="X:1&#10;Q:1/4=92&#10;K:Dm&#10;|: d2 f2 e2 c2 :|"></textarea>
+            <small>Use ABC notation when an exact melody or recurring project theme must guide the song.</small>
+          </div></details>
           <div id="musicCompile" class="musicCompile" aria-live="polite"></div>
-          <div class="composerBar"><button id="musicManageBtn" class="composerTool">▣ Models · YuE 2</button><button id="musicSkillBtn" class="composerTool">✣ Skills</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>
+          <div class="composerBar"><button id="musicSkillBtn" class="composerTool">✣ Skills</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>
         </section>
       </div>
       <div class="generateFooter"><button id="genBtn" class="generatePrimary" type="button"><span>Generate scene</span><span aria-hidden="true">→</span></button></div>
@@ -210,7 +210,7 @@
     <div class="tltool"><button id="freezeBtn" title="Freeze frame at playhead">❄</button><span>Freeze</span></div>
     <div class="tltool"><button id="frameBtn" title="Extract the frame at the playhead into the media bin">▣</button><span>Frame</span></div>
     <div class="tltool" id="detachAudioTool" hidden><button id="detachAudioBtn" title="Detach audio from selected clip" aria-label="Detach audio"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 7v10M12 5v14M16 8v8M20 10v4"/><path d="M5 20 19 4"/></svg></button><span>Detach audio</span></div>
-    <div class="tltool"><button id="zoomOut" title="Zoom out (−)">−</button><span class="zoomval" id="zoomVal">1×</span><button id="zoomIn" title="Zoom in (+)">＋</button></div>
+    <div class="tltool tlZoom"><button id="zoomOut" title="Zoom out (−)">−</button><input type="range" id="zoomSlider" class="zoomSlider" min="20" max="400" step="2" value="100" title="Timeline zoom" aria-label="Timeline zoom"><span class="zoomval" id="zoomVal">1×</span><button id="zoomIn" title="Zoom in (+)">＋</button></div>
     <div class="tltool"><button id="tlMaxBtn" title="Maximize / minimize the timeline (double-click the Timeline title)" aria-label="Expand timeline"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.25 3.75h-3.5v3.5M12.75 16.25h3.5v-3.5M3.9 7.1l3.2-3.2m5.8 12.2 3.2-3.2"/></svg></button><span id="tlMaxLabel">Expand</span></div>
     <div class="tltool"><button id="addVTrack" title="Add a video track (overlays stack on top)">＋V</button><span>Video</span></div>
     <div class="tltool"><button id="addATrack" title="Add an audio track">＋A</button><span>Audio</span></div>
@@ -328,7 +328,7 @@
 
 <div id="musicLyricsSheet" class="modelUninstallSheet" aria-hidden="true">
   <button class="sheetScrim" id="musicLyricsScrim" aria-label="Close lyrics review"></button>
-  <aside class="modelUninstallPanel" role="dialog" aria-modal="true" aria-labelledby="musicLyricsTitle">
+  <aside class="sheetPanel modelUninstallPanel musicLyricsPanel" role="dialog" aria-modal="true" aria-labelledby="musicLyricsTitle">
     <div class="sheetHead"><div><h2 id="musicLyricsTitle">Review lyrics</h2><p>Make any final changes before using this draft.</p></div><button class="sheetClose" id="musicLyricsClose" aria-label="Close">×</button></div>
     <div class="sheetPanelBody"><textarea class="txt" id="musicLyricsDraft" spellcheck="true"></textarea></div>
     <div class="sheetFoot"><button class="btn ghost" id="musicLyricsCancel">Cancel</button><button class="btn primary" id="musicLyricsApply">Use these lyrics</button></div>

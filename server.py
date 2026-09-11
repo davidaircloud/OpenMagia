@@ -759,22 +759,42 @@ def compiled_skill_direction(skill_id):
     compiled = compile_skill_contract(skill_id)
     return compiled["refinement_direction"] if compiled else ""
 
-def refine_music_brief(idea, lyrics="", skill_id=""):
-    """Use the configured refinement model as an editor before YuE sees a request."""
+def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
+    """Use the configured refinement model as an editor before YuE sees a request.
+
+    ``instrumental`` reflects the composer's "No lead vocal" choice. YuE 2 has no
+    instrumental switch, so the only shape that keeps vocals out is the
+    [Instrumental] section: never let the refiner draft sung words when the
+    artist asked for instrumental, and never move the brief into the lyrics.
+    """
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
+    instrumental = bool(instrumental) or (not lyrics and bool(re.search(
+        r"\b(?:instrumental|no (?:lead )?vocals?|without vocals?|no singing)\b", idea, re.I)))
+    plan_mode = "off" if instrumental else "full"
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
+    if instrumental:
+        lyrics = yue_prompts.INSTRUMENTAL_LYRICS
     direction = compiled_skill_direction(skill_id)
     fallback_style = idea
     if direction and direction.lower() not in idea.lower():
         fallback_style = (idea + (". " if idea else "") + direction).strip()
+    if instrumental and "instrumental" not in fallback_style.lower():
+        fallback_style = (fallback_style + (". " if fallback_style else "") + yue_prompts.INSTRUMENTAL_STYLE_TAG).strip()
     if not formatter_available():
-        return {"style": fallback_style, "lyrics": lyrics, "used_ai": False}
-    instruction = (
-        "Act as a music editor preparing a YuE 2 request. Return JSON only with keys style and lyrics. "
-        "Style must be concise audible direction: language, genre, tempo or feel, ensemble, vocal timbre, production, and emotional arc. "
+        return {"style": fallback_style, "lyrics": lyrics, "instrumental": instrumental,
+                "plan_mode": plan_mode, "used_ai": False}
+    lyric_rule = (
+        "This is an instrumental track: return lyrics as exactly [Instrumental] and do not write any sung words. "
+        "Write the style as an instrumental arrangement with no lead vocal and no sung words. "
+        if instrumental else
         "If lyrics are supplied, preserve every word and line in the same order; you may only add bracketed section labels. "
         "If lyrics are empty, draft concise singable sectioned lyrics only when the brief asks for a song with vocals; for instrumental work return [Instrumental]. "
+    )
+    instruction = (
+        "Act as a music editor preparing a YuE 2 request. Return JSON only with keys style, lyrics, instrumental, and plan_mode. "
+        "Style must be concise audible direction: language, genre, tempo or feel, ensemble, vocal timbre, production, and emotional arc. "
+        + lyric_rule +
         "Never promise duration, stems, voice cloning, reference-audio imitation, or an artist match.\n"
         f"SKILL:\n{direction}\nBRIEF:\n{idea}\nLYRICS:\n{lyrics}")
     cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "1200", "--temp", "0.2",
@@ -783,21 +803,38 @@ def refine_music_brief(idea, lyrics="", skill_id=""):
         run = run_formatter_command(cmd, timeout=90)
         data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
         style, refined_lyrics = str(data.get("style") or "").strip(), str(data.get("lyrics") or "").strip()
+        if instrumental:
+            # Vocals are never allowed to sneak back in for an instrumental brief,
+            # and a collapsed one-word style (e.g. just "Instrumental") must never
+            # replace the artist's full description: fall back to the rich brief.
+            if run.returncode == 0 and style and len(style.strip()) >= 40:
+                return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
+                        "lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "instrumental": True,
+                        "plan_mode": "off", "used_ai": True}
+            return {"style": fallback_style, "lyrics": yue_prompts.INSTRUMENTAL_LYRICS,
+                    "instrumental": True, "plan_mode": "off", "used_ai": False}
         original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         if run.returncode == 0 and style and refined_lyrics and (not lyrics or original_lines == refined_lines):
             return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
-                    "lyrics": refined_lyrics[:yue_prompts.MAX_LYRICS_CHARS], "used_ai": True}
+                    "lyrics": refined_lyrics[:yue_prompts.MAX_LYRICS_CHARS],
+                    "instrumental": bool(data.get("instrumental", False)),
+                    "plan_mode": str(data.get("plan_mode") or "full") if str(data.get("plan_mode") or "full") in {"full", "melody", "off"} else "full",
+                    "used_ai": True}
     except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
         pass
-    return {"style": fallback_style, "lyrics": lyrics, "used_ai": False}
+    return {"style": fallback_style, "lyrics": lyrics, "instrumental": instrumental,
+            "plan_mode": plan_mode, "used_ai": False}
 
 
-def refine_music_lyrics(idea, lyrics="", skill_id=""):
+def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
     """Draft or revise lyrics separately so the artist can review them before use."""
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
+    if instrumental:
+        # The composer asked for "No lead vocal"; there are no words to draft.
+        return {"lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "used_ai": False}
     if not formatter_available():
         raise ValueError("The refinement model is not available. Open Models to install or connect it.")
     direction = compiled_skill_direction(skill_id)
@@ -956,6 +993,7 @@ lock = threading.Lock()
 job_lock = threading.Lock()
 project_save_lock = threading.Lock()
 active_job = None
+active_job_since = 0.0   # wall-clock when active_job was claimed, to spot a phantom
 scene_proc = None
 queue = []
 progress = {}
@@ -1362,7 +1400,8 @@ def repair_generation_placeholders(project):
         media.append({
             "id": uuid.uuid4().hex[:10], "asset_uid": uuid.uuid4().hex[:16], "src": "",
             "name": scene.get("name", "Generated scene"),
-            "kind": "image" if scene.get("generation_type") == "image" else "video",
+            "kind": ("audio" if scene.get("generation_type") == "music" else
+                     "image" if scene.get("generation_type") == "image" else "video"),
             "duration": 0, "w": scene.get("params", {}).get("width", 0),
             "h": scene.get("params", {}).get("height", 0), "hasAudio": False,
             "source": "generated", "status": status, "scene_id": scene.get("id"),
@@ -1372,6 +1411,55 @@ def repair_generation_placeholders(project):
                            "type": scene.get("generation_type", "video")},
         })
         changed = True
+    return changed
+
+
+def repair_generation_media_integrity(project):
+    """Collapse stale duplicate placeholders and recover generated audio still on disk."""
+    changed = False
+    media = project.setdefault("media", [])
+    music_scene_ids = {scene.get("id") for scene in project.get("scenes", [])
+                       if scene.get("generation_type") == "music"}
+    for item in media:
+        if item.get("scene_id") in music_scene_ids and item.get("kind") != "audio":
+            item["kind"] = "audio"
+            item["hasAudio"] = item.get("status") == "ready"
+            changed = True
+    by_scene = {}
+    for item in media:
+        if item.get("scene_id"):
+            by_scene.setdefault(item["scene_id"], []).append(item)
+    for scene_id, items in by_scene.items():
+        ready = next((item for item in items if item.get("status") == "ready" and item.get("src")), None)
+        if not ready:
+            continue
+        stale_ids = {item["id"] for item in items if item is not ready and item.get("status") in ("queued", "running", "error")}
+        if not stale_ids:
+            continue
+        project["media"] = [item for item in project["media"] if item.get("id") not in stale_ids]
+        for track in project.get("tracks", []):
+            for clip in track.get("clips", []):
+                if clip.get("mediaId") in stale_ids:
+                    clip["mediaId"] = ready["id"]
+        changed = True
+    known = {item.get("id") for item in project.get("media", [])}
+    base = proj_dir(project["slug"])
+    for track in project.get("tracks", []):
+        if track.get("kind") != "audio":
+            continue
+        for clip in track.get("clips", []):
+            if clip.get("mediaId") in known or not clip.get("sceneId"):
+                continue
+            path = base / "media" / f"gen-{clip['sceneId']}.flac"
+            if not path.is_file():
+                continue
+            info = nle.probe(path)
+            project["media"].append({"id":clip["mediaId"], "asset_uid":uuid.uuid4().hex[:16],
+                "src":str(path.relative_to(base)), "name":"Recovered song", "kind":"audio",
+                "duration":info.get("duration", 0), "w":0, "h":0, "hasAudio":True,
+                "source":"generated", "status":"ready", "scene_id":clip["sceneId"],
+                "generation":{"type":"music", "engine":"yue2"}})
+            known.add(clip["mediaId"]); changed = True
     return changed
 
 
@@ -1417,12 +1505,13 @@ def load_project():
         if not p.get("slug"):
             p["slug"] = slug
         media_repaired = repair_media_paths(p)
+        integrity_repaired = repair_generation_media_integrity(p)
         generation_media_repaired = repair_generation_placeholders(p)
         sheets_repaired = repair_completed_sheets(p)
         sheet_views_upgraded = upgrade_sheet_extractions(p)
         sheets_promoted = promote_completed_sheets(p)
         timeline_repaired = repair_timeline_overlaps(p)
-        if media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted or timeline_repaired:
+        if media_repaired or integrity_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted or timeline_repaired:
             save_project(p)
         return p
     p = new_project()
@@ -1442,6 +1531,7 @@ def load_project_slug(slug):
     p.setdefault("project_style_skills", [])
     p.setdefault("storyboard_draft", None)
     media_repaired = repair_media_paths(p)
+    integrity_repaired = repair_generation_media_integrity(p)
     generation_media_repaired = repair_generation_placeholders(p)
     sheets_repaired = repair_completed_sheets(p)
     sheet_views_upgraded = upgrade_sheet_extractions(p)
@@ -1459,7 +1549,7 @@ def load_project_slug(slug):
             stamp += 1
             m["created"] = stamp
             changed = True
-    if changed or media_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted:
+    if changed or media_repaired or integrity_repaired or generation_media_repaired or sheets_repaired or sheet_views_upgraded or sheets_promoted:
         save_project(p)
     return p
 
@@ -4060,7 +4150,18 @@ def run_music_job(scene_id, project):
             raw = pdir / f"gen-{scene_id}.flac"
             raw.write_bytes(audio)
             info = nle.probe(raw)
-            m = add_media(project, raw, scene["name"], "audio", "generated")
+            # Reuse the queued placeholder created at generation start so its
+            # "Generating…" tile turns into the finished song instead of being
+            # orphaned as a permanent pending card (mirrors the video path).
+            base = proj_dir(project["slug"])
+            m = next((x for x in project["media"] if x.get("scene_id") == scene_id), None)
+            if m:
+                m.update({"src": str(raw.relative_to(base)), "name": scene["name"], "kind": "audio",
+                          "source": "generated", "status": "ready", "duration": info["duration"],
+                          "w": info.get("w", 0), "h": info.get("h", 0), "hasAudio": info.get("hasAudio", True)})
+                m.pop("error", None)
+            else:
+                m = add_media(project, raw, scene["name"], "audio", "generated")
             m["scene_id"] = scene_id
             m["style_profile"] = dict(scene.get("style_profile") or {})
             audit = compiled["audit"]
@@ -4415,6 +4516,9 @@ def cancel_scene_tree(scene_id):
             project["scenes"] = [s for s in project.get("scenes", []) if s.get("id") not in ids]
             project["order"] = [sid for sid in project.get("order", []) if sid not in ids]
             project["media"] = [m for m in project.get("media", []) if m.get("scene_id") not in ids]
+            for track in project.get("tracks", []):
+                track["clips"] = [clip for clip in track.get("clips", [])
+                                  if clip.get("sceneId") not in ids and clip.get("mediaId") not in media_ids]
             save_project(project)
         if owns_worker:
             terminate_process_tree(scene_proc)
@@ -4422,11 +4526,12 @@ def cancel_scene_tree(scene_id):
 
 
 def pump_queue(project):
-    global active_job
+    global active_job, active_job_since
     if active_job is not None or not queue:
         return
     scene_id = queue.pop(0)
     active_job = scene_id
+    active_job_since = time.time()
     threading.Thread(target=run_job_guarded, args=(scene_id, project), daemon=True).start()
 
 
@@ -4471,10 +4576,21 @@ def recover_queue(project):
     because no inference process survived the restart. Scene-list order is the
     authoritative generation order.
     """
-    global active_job
+    global active_job, active_job_since
     with job_lock:
         if active_job is not None:
-            return
+            # A live job is one whose scene is actually "running" (music keeps it
+            # running for the whole generation, and every job records progress or
+            # holds a subprocess). If the claimant matches none of those and has
+            # been held for a while, its worker thread is gone and it is wedging
+            # the queue forever — release it and heal below.
+            live = any(s.get("id") == active_job and s.get("status") == "running"
+                       for s in load_project_slug(project["slug"]).get("scenes", []))
+            if not live and active_job not in progress and scene_proc is None \
+                    and time.time() - active_job_since > 15:
+                active_job = None
+            else:
+                return
         latest = load_project_slug(project["slug"])
         changed = False
         persisted = []
@@ -5065,9 +5181,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/music/refine":
             b = self._body()
             try:
+                instrumental = bool(b.get("instrumental"))
                 if b.get("action") == "lyrics":
-                    return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
-                return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
+                    return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))
+                return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
         if p == "/api/music/stop":
