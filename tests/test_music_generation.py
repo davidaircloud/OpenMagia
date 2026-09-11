@@ -192,6 +192,8 @@ class Registry(unittest.TestCase):
         self.assertIn('class="sheetPanel modelUninstallPanel musicLyricsPanel"', html)
         self.assertNotIn('id="musicManageBtn"', html)
         self.assertIn("m.kind==='audio'", script)
+        self.assertIn("musicCompileFingerprint", script)
+        self.assertIn("generateScrollTop", script)
 
 
 class Skills(unittest.TestCase):
