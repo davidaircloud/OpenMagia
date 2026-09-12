@@ -825,6 +825,13 @@ def compiled_skill_direction(skill_id):
     return compiled["refinement_direction"] if compiled else ""
 
 
+def compiled_music_direction(skill_id, customization=""):
+    """Keep the bundled contract intact while adding one artist-readable focus."""
+    direction = compiled_skill_direction(skill_id)
+    focus = yue_prompts.clean_text(str(customization or ""))[:500]
+    return direction + ((" Artist customization: " + focus + ".") if focus else "")
+
+
 def normalize_music_brief_text(value):
     """Remove pasted table marks and exact repeated sentences from a music brief."""
     text = re.sub(r"\s*[│┃]\s*", " ", str(value or ""))
@@ -859,7 +866,7 @@ def music_vocal_intent(idea):
         return "instrumental"
     return "unspecified"
 
-def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
+def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False, skill_customization=""):
     """Use the configured refinement model as an editor before YuE sees a request.
 
     ``instrumental`` reflects the composer's "No lead vocal" choice. YuE 2 has no
@@ -875,7 +882,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
         raise ValueError("Describe the song or provide lyrics first.")
     if instrumental:
         lyrics = yue_prompts.INSTRUMENTAL_LYRICS
-    direction = compiled_skill_direction(skill_id)
+    direction = compiled_music_direction(skill_id, skill_customization)
     fallback_style = idea
     if direction and direction.lower() not in idea.lower():
         fallback_style = (idea + (". " if idea else "") + direction).strip()
@@ -957,7 +964,7 @@ def trim_music_style(value):
     return head[:boundary + 1] if boundary >= int(limit * .55) else head.rstrip(" ,;:-")
 
 
-def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
+def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False, skill_customization=""):
     """Draft or revise lyrics separately so the artist can review them before use."""
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
     if not idea and not lyrics:
@@ -967,7 +974,7 @@ def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
         return {"lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "used_ai": False}
     if not formatter_available():
         raise ValueError("The refinement model is not available. Open Models to install or connect it.")
-    direction = compiled_skill_direction(skill_id)
+    direction = compiled_music_direction(skill_id, skill_customization)
     task = ("Rewrite and improve the supplied lyrics. Preserve their language, core meaning, and strongest images, "
             "but you may change words, rhyme, meter, repetition, and section order."
             if lyrics else
@@ -4294,7 +4301,7 @@ def music_request_from_scene(scene):
             # into scene directions, so it is refused rather than quietly reinterpreted.
             raise ValueError(f"'{skill_id}' is a {kinds[skill_id]} skill. YuE 2 takes a music skill "
                              "(Song director, Score underscore, Album identity) or none.")
-    direction = compiled_skill_direction(skill_id) if skill_id else ""
+    direction = compiled_music_direction(skill_id, scene.get("skill_customization")) if skill_id else ""
     return yue_prompts.format_music_request(
         idea=scene.get("prompt") or "", lyrics=params.get("lyrics") or "",
         answers=params.get("answers") or {}, plan_mode=params.get("plan_mode") or "full",
@@ -5433,7 +5440,8 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             scene = {"id": "preview", "name": str(b.get("name") or "song"),
                      "prompt": str(b.get("prompt") or ""), "params": dict(b.get("params") or {}),
-                     "prompt_skill_id": str(b.get("prompt_skill_id") or "")}
+                     "prompt_skill_id": str(b.get("prompt_skill_id") or ""),
+                     "skill_customization": str(b.get("skill_customization") or "")}
             try:
                 compiled = music_request_from_scene(scene)
             except ValueError as exc:
@@ -5450,8 +5458,10 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get("action") == "title":
                     return self._json(generate_music_title(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id")))
                 if b.get("action") == "lyrics":
-                    return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))
-                return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental))
+                    return self._json(refine_music_lyrics(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental,
+                                                          b.get("skill_customization")))
+                return self._json(refine_music_brief(b.get("prompt"), b.get("lyrics"), b.get("prompt_skill_id"), instrumental,
+                                                     b.get("skill_customization")))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
         if p == "/api/music/stop":
@@ -5907,6 +5917,7 @@ class Handler(BaseHTTPRequestHandler):
                  "params": params, "guide_answers": dict(b.get("guide_answers") or {}),
                  "template_id": b.get("template_id"), "generation_type": generation_type,
                  "prompt_skill_id": b.get("prompt_skill_id"),
+                 "skill_customization": str(b.get("skill_customization") or "")[:500],
                  "style_profile": dict(proj.get("style_profile") or {}) if use_project_style else {},
                  "use_project_style": use_project_style,
                  "chain": bool(b.get("chain")), "source_media_id": b.get("source_media_id"),

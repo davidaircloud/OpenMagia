@@ -239,10 +239,20 @@ class Skills(unittest.TestCase):
         self.assertEqual({item["id"] for item in music},
                          {"song-director", "score-underscore", "album-identity"})
         for item in music:
+            self.assertEqual(item["source_short"], "OpenMagia")
+            self.assertIn("YuE", item["source_label"])
+            self.assertTrue(item["source_url"].startswith("https://github.com/multimodal-art-projection/YuE"))
+            self.assertTrue(item["user_prompt"])
             contract = server.compile_skill_contract(item["id"])
             self.assertTrue(contract["refinement_direction"])
             self.assertTrue(contract["music_direction"])
             self.assertFalse(contract["visual_direction"])
+
+    def test_music_skill_customization_extends_instead_of_replacing_contract(self):
+        base = server.compiled_skill_direction("score-underscore")
+        customized = server.compiled_music_direction("score-underscore", "Leave room for dialogue and end with cello.")
+        self.assertTrue(customized.startswith(base))
+        self.assertIn("Artist customization: Leave room for dialogue and end with cello.", customized)
 
     def test_music_refiner_fallback_is_media_specific(self):
         original = server.FORMATTER_MODEL

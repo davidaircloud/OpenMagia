@@ -2067,7 +2067,7 @@ function renderComposerPicker() {
       const selected=musicSkillMode?musicSkillId===skill.id:activePromptSkill&&activePromptSkill.id===skill.id;
       const b = document.createElement('button'); b.className = 'pickerRow skillPickerRow' + (selected ? ' on' : '');
       const preview=musicSkillMode?'<span class="musicSkillThumb" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 17.5a3 3 0 1 1-2-2.83V7l10-2v9.5a3 3 0 1 1-2-2.83V8L9 9.2z"/></svg></span>':skillPreviewMarkup(skill,'picker');
-      b.innerHTML = '<span class="skillPickerPreview'+(skill.custom?' customSkillArt':'')+'">'+preview+'</span><span><strong>' + esc(skill.name) + ' <code>/' + esc(skill.id) + '</code></strong><small>' + esc(skill.description) + '</small></span><em>'+(skill.custom?'Custom':'Prompt')+'</em>';
+      b.innerHTML = '<span class="skillPickerPreview'+(skill.custom?' customSkillArt':'')+'">'+preview+'</span><span><strong>' + esc(skill.name) + '</strong><small>' + esc(skill.description) + '</small></span><em>'+esc(skill.custom?'Your skill':(skill.source_short||'OpenMagia'))+'</em>';
       bindSkillPreviewFallback(b);
       b.addEventListener('click', () => { closeComposerPicker(); openSkillDetail(skill, 'prompt-picker'); }); wrap.appendChild(b);
     }
@@ -2117,7 +2117,7 @@ function renderPickerDetail() {
     else if (sourceMode) { sourceSelection = { mediaId:item.id, frame:pendingSourceFrame, name:item.name }; renderSourceContext(); closeComposerPicker(); }
     else if (modelMode) { selectedModel = item.id; $('#modelPickerBtn').textContent = '▣ Models · H3'; closeComposerPicker(); }
     else if (styleMode) applyProjectStyle(item);
-    else if(composerPickerMode==='music-skills'){musicSkillId=item.id;renderMusicSkills();compileMusicPreview(true);closeComposerPicker();$('#musicPrompt').focus();}
+    else if(composerPickerMode==='music-skills'){if(musicSkillId!==item.id)musicSkillCustomization='';musicSkillId=item.id;renderMusicSkills();compileMusicPreview(true);closeComposerPicker();$('#musicPrompt').focus();}
     else { activePromptSkill = item; renderActivePromptSkill(); closeComposerPicker(); $('#genPrompt').focus(); }
   });
   if (sourceMode && sourceSelection) {
@@ -2475,7 +2475,7 @@ function applyGenerationType() {
    description, lyrics, planning mode, optional ABC score, seed. Length, tempo, key,
    reference audio and negative prompts are absent because YuE 2 has no argument for
    them - the compile sheet says where anything written for them actually goes. */
-let musicSkillId='',musicCompileTimer=null,musicCompileFingerprint='',musicCompileRequest=0,musicBound=false;
+let musicSkillId='',musicSkillCustomization='',musicCompileTimer=null,musicCompileFingerprint='',musicCompileRequest=0,musicBound=false;
 function musicRuntime(){return (engine&&engine.music)||null;}
 function musicReady(){const runtime=musicRuntime();return !!(runtime&&runtime.ready);}
 function syncMusicPlanAvailability(){const plan=$('#musicPlan'),vocal=$('#musicVocal');if(!plan||!vocal)return;
@@ -2487,17 +2487,19 @@ function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal')
     seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
 function resetMusicComposer(){if($('#musicPrompt'))$('#musicPrompt').value='';if($('#musicLyrics'))$('#musicLyrics').value='';
   if($('#musicAbc'))$('#musicAbc').value='';if($('#musicPlan'))$('#musicPlan').value='full';if($('#musicVocal'))$('#musicVocal').value='lead';
-  if($('#musicSeed'))$('#musicSeed').value=Math.floor(Math.random()*1e9);musicSkillId='';musicCompileFingerprint='';musicCompileRequest++;
+  if($('#musicSeed'))$('#musicSeed').value=Math.floor(Math.random()*1e9);musicSkillId='';musicSkillCustomization='';musicCompileFingerprint='';musicCompileRequest++;
   if(musicCompileTimer)clearTimeout(musicCompileTimer);if($('#musicCompile'))$('#musicCompile').innerHTML='';
   if($('#musicLyricsRefineBtn'))$('#musicLyricsRefineBtn').textContent='✦ Write with model';renderMusicSkills();syncMusicPlanAvailability();}
 function closeMusicLyricsSheet(){const sheet=$('#musicLyricsSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
 async function openMusicLyricsSheet(){const params=musicComposerParams();if(params.instrumental){toast('No lead vocal is selected, so there are no words to write. Switch Voice to "Lead vocal" to add lyrics.','warn');return;}if(!engine||!engine.formatter){toast('Install Prompt refinement in Models to write or refine lyrics.','warn');setHubView('settings');return;}const idea=$('#musicPrompt').value.trim(),lyrics=$('#musicLyrics').value.trim();if(!idea&&!lyrics){toast('Describe the song first','err');return;}
   const button=$('#musicLyricsRefineBtn');button.disabled=true;button.textContent=lyrics?'Refining…':'Writing…';
-  try{const out=await api('/api/music/refine',{method:'POST',body:{action:'lyrics',prompt:idea,lyrics,prompt_skill_id:musicSkillId}});$('#musicLyricsDraft').value=out.lyrics;$('#musicLyricsTitle').textContent=lyrics?'Review refined lyrics':'Review lyric draft';const sheet=$('#musicLyricsSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#musicLyricsDraft').focus();}
+  try{const out=await api('/api/music/refine',{method:'POST',body:{action:'lyrics',prompt:idea,lyrics,prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization}});$('#musicLyricsDraft').value=out.lyrics;$('#musicLyricsTitle').textContent=lyrics?'Review refined lyrics':'Review lyric draft';const sheet=$('#musicLyricsSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#musicLyricsDraft').focus();}
   catch(error){toast(error.message,'err');}finally{button.disabled=false;button.textContent=lyrics?'✦ Refine lyrics':'✦ Write with model';}}
 function musicSkills(){return [{id:'',name:'No skill',description:'Use the description and lyrics as written'},...SKILL_CATALOG.filter(item=>item.type==='music')];}
 function renderMusicSkills(){const box=$('#activeMusicSkill');if(!box)return;box.innerHTML='';const item=musicSkills().find(skill=>skill.id===musicSkillId);if(!item||!item.id)return;
-  const chip=document.createElement('button');chip.className='activeSkillChip';chip.innerHTML='<span>/'+esc(item.id)+'</span><b>×</b>';chip.title='Remove music skill';chip.addEventListener('click',()=>{musicSkillId='';renderMusicSkills();compileMusicPreview(true);});box.appendChild(chip);}
+  box.innerHTML='<div class="activeMusicSkillHead"><span><b>'+esc(item.name)+'</b><small>'+esc(item.source_label||'OpenMagia workflow')+'</small></span><button type="button" aria-label="Remove '+esc(item.name)+'">×</button></div><p>'+esc(item.description)+'</p><label>Adapt this workflow for this song<textarea class="txt" id="musicSkillCustomization" rows="2" placeholder="Optional: what should this workflow emphasize?">'+esc(musicSkillCustomization)+'</textarea></label>';
+  $('button',box).addEventListener('click',()=>{musicSkillId='';musicSkillCustomization='';renderMusicSkills();compileMusicPreview(true);});
+  $('#musicSkillCustomization').addEventListener('input',event=>{musicSkillCustomization=event.target.value;compileMusicPreview(false);});}
 function musicNoticeMarkup(){const runtime=musicRuntime();
   if(!runtime)return '<strong>Music runtime state unavailable</strong><span>Reload OpenMagia, or open Models and check again.</span>';
   if(runtime.ready)return '<strong>YuE 2 · '+(runtime.device?esc(runtime.device):'this machine')+'</strong><span>A song renders in one pass and lands on the audio track when it finishes. Stopping early keeps nothing: YuE 2 decodes audio only at the end.</span>';
@@ -2507,11 +2509,11 @@ function musicNoticeMarkup(){const runtime=musicRuntime();
     ' <button id="musicGoSettings" class="btn primary" type="button">Open Models</button></span>';}
 async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||($('#genType')||{}).value!=='music')return;
   const prompt=($('#musicPrompt')||{}).value||'',params=musicComposerParams();
-  const fingerprint=JSON.stringify({prompt,params,skill:musicSkillId});
+  const fingerprint=JSON.stringify({prompt,params,skill:musicSkillId,skill_customization:musicSkillCustomization});
   if(fingerprint===musicCompileFingerprint)return;
   if(!prompt.trim()&&!String(params.lyrics).trim()){musicCompileFingerprint=fingerprint;box.innerHTML='';return;}
   const run=async()=>{const request=++musicCompileRequest;musicCompileFingerprint=fingerprint;
-    try{await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId}});
+    try{await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization}});
       if(request!==musicCompileRequest)return;
       box.innerHTML='';musicCompileFingerprint=fingerprint;}
     catch(error){if(request===musicCompileRequest){box.innerHTML='';musicCompileFingerprint=fingerprint;}}};
@@ -2520,7 +2522,7 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
 function bindMusicComposer(){syncMusicPlanAvailability();if(musicBound)return;musicBound=true;
   ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal'||sel==='#musicAbc')syncMusicPlanAvailability();compileMusicPreview(false);});});
   const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
-  const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{if(!engine||!engine.formatter){toast('Install Prompt refinement in Models to use Refine.','warn');setHubView('settings');return;}refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
+  const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{if(!engine||!engine.formatter){toast('Install Prompt refinement in Models to use Refine.','warn');setHubView('settings');return;}refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
   // reply like "Instrumental" must never overwrite the artist's full description.
   if(refined && refined.length >= Math.min(originalLen||refined.length,80))$('#musicPrompt').value=refined;if(out.instrumental!=null)$('#musicVocal').value=out.instrumental?'instrumental':'lead';if(['full','melody','off'].includes(out.plan_mode))$('#musicPlan').value=out.plan_mode;syncMusicPlanAvailability();toast(out.used_ai?(out.instrumental?'Instrumental direction refined':'Music direction refined'):'Music direction structured','ok');compileMusicPreview(true);}catch(error){toast(error.message,'err');}finally{refine.disabled=false;refine.textContent='✦ Refine';}});
   const skills=$('#musicSkillBtn');if(skills)skills.addEventListener('click',()=>openComposerPicker('music-skills'));
@@ -2535,10 +2537,10 @@ async function generateMusic(){
   if(!idea&&!lyrics.trim()){toast('Describe the song or write lyrics first','err');return;}
   generationSubmitting=true;const button=$('#genBtn');button.disabled=true;button.setAttribute('aria-busy','true');
   try{const title=await api('/api/music/refine',{method:'POST',body:{action:'title',prompt:idea,lyrics,prompt_skill_id:musicSkillId}});
-    await api('/api/music/preview',{method:'POST',body:{prompt:idea,params:musicComposerParams(),prompt_skill_id:musicSkillId}});
+    await api('/api/music/preview',{method:'POST',body:{prompt:idea,params:musicComposerParams(),prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization}});
     const songTitle=String(title&&title.title||'').trim();// A real title needs a letter; reject junk like '...' so the server derives a fallback name.
     const usableTitle=/[^\W\d_]/i.test(songTitle)?songTitle:undefined;
-    const scene=await api('/api/scenes',{method:'POST',body:{name:usableTitle,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,params:musicComposerParams()}});
+    const scene=await api('/api/scenes',{method:'POST',body:{name:usableTitle,generation_type:'music',prompt:idea,prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization,params:musicComposerParams()}});
     await api('/api/scenes/'+scene.id+'/generate',{method:'POST',body:{}});
     resetMusicComposer();toast('Song queued · '+scene.name,'ok');await refresh(true);
   }catch(error){toast(error.message,'err');}
@@ -4008,7 +4010,7 @@ function renderSkillsCenter() {
   }
   for (const s of skills) {
     const card = document.createElement('button'); card.className = 'hubCard'; card.innerHTML = '<div class="skillArt'+(s.custom?' customSkillArt':'')+'">'+skillPreviewMarkup(s,'card')+'</div><div class="hubMeta"><h3></h3><p></p><span class="hubBadge"></span></div>';
-    bindSkillPreviewFallback(card); card.querySelector('h3').textContent = s.name; card.querySelector('p').textContent = s.description; card.querySelector('.hubBadge').textContent = s.projectStyle?'Custom · project style':(s.custom ? 'Custom · prompt skill' : 'OpenMagia · prompt skill');
+    bindSkillPreviewFallback(card); card.querySelector('h3').textContent = s.name; card.querySelector('p').textContent = s.description; card.querySelector('.hubBadge').textContent = s.projectStyle?'Custom · project style':(s.custom ? 'Your prompt skill' : (s.source_label||'OpenMagia workflow'));
     card.addEventListener('click', () => openSkillDetail(s)); grid.appendChild(card);
   }
   kickAutoplay(grid);
@@ -4020,7 +4022,7 @@ async function openSkillDetail(s, origin='skills-menu') {
   const updated=s.updated?new Date(s.updated*1000).toLocaleString():'Not recorded';
   const context=s.projectStyle?'<div class="projectStyleContext"><div><span>Created for</span><strong>'+esc(owner)+'</strong></div><div><span>Continuity anchor</span><strong>'+esc(anchor)+'</strong></div><div><span>Evidence</span><strong>'+esc(String(s.scene_count??state.scenes.length))+' generated scenes · '+esc(String(s.character_count??state.characters.length))+' character locks</strong></div><div><span>Last updated</span><strong>'+esc(updated)+'</strong></div></div>':'';
   $('#skillDetailTitle').textContent=s.name;
-  $('#skillDetailSubtitle').textContent=s.projectStyle?'Project-specific continuity created for '+owner:(s.custom?'Your custom skill':'OpenMagia skill');
+  $('#skillDetailSubtitle').textContent=s.projectStyle?'Project-specific continuity created for '+owner:(s.custom?'Your custom skill':(s.source_label||'OpenMagia workflow'));
   const detailPreview=skillPreviewMarkup(s,'detail');
   body.innerHTML='<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+'<p class="pickerDetailNote">'+(s.projectStyle?'Loading continuity profile…':'Loading complete skill specification…')+'</p></div>';
   body.querySelector('.skillDetailDescription').textContent=s.description;bindSkillPreviewFallback(body);kickAutoplay(body);
@@ -4030,11 +4032,12 @@ async function openSkillDetail(s, origin='skills-menu') {
   else if(s.custom) specification=s.specification||('# '+s.name+'\n\n'+s.description);
   else try{const contractName=s.type==='music'?'music-production-contract.md':'h3-production-contract.md',contractTitle=s.type==='music'?'Linked music production contract':'Linked H3 production contract';const [response,contract]=await Promise.all([fetch('/skills/openmagia/'+encodeURIComponent(s.id)+'/SKILL.md',{cache:'no-store'}),fetch('/skills/openmagia/references/'+contractName,{cache:'no-store'})]);if(!response.ok||!contract.ok)throw new Error('Skill specification unavailable');specification=(await response.text())+'\n\n---\n\n## '+contractTitle+'\n\n'+(await contract.text());}catch(error){specification='This skill specification could not be loaded. OpenMagia will not substitute a different workflow.\n\n'+error.message;}
   if(request!==skillDetailRequest)return;
-  body.innerHTML = '<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+'<h3>'+(s.projectStyle?'Continuity specification':'Complete skill specification')+'</h3><pre class="skillSpec"></pre></div><div class="skillSheetFoot">'+(s.projectStyle?'<button class="btn ghost danger" id="deleteProjectStyle">Delete</button>':'')+'<button class="btn primary" id="useSkillBtn">'+(s.projectStyle?'Use project style':'Use Skill')+'</button></div>';
+  const provenance=!s.projectStyle&&!s.custom&&s.source_label?'<div class="skillProvenance"><span>Source</span>'+(s.source_url?'<a href="'+esc(s.source_url)+'" target="_blank" rel="noopener">'+esc(s.source_label)+' ↗</a>':'<strong>'+esc(s.source_label)+'</strong>')+'<small>'+esc(s.source_note||'')+'</small></div>':'';
+  body.innerHTML = '<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+provenance+(s.user_prompt?'<div class="skillUseWhen"><span>Use this when</span><p>'+esc(s.user_prompt)+'</p></div>':'')+'<h3>'+(s.projectStyle?'Continuity specification':'Complete skill specification')+'</h3><pre class="skillSpec"></pre></div><div class="skillSheetFoot">'+(s.projectStyle?'<button class="btn ghost danger" id="deleteProjectStyle">Delete</button>':'')+'<button class="btn primary" id="useSkillBtn">'+(s.projectStyle?'Use project style':'Use Skill')+'</button></div>';
   body.querySelector('.skillDetailDescription').textContent=s.description;body.querySelector('.skillSpec').textContent=specification;bindSkillPreviewFallback(body);kickAutoplay(body);
   body.querySelector('#useSkillBtn').addEventListener('click', async() => {
     if(s.projectStyle){const profile={name:s.name,prompt:s.prompt,skill_id:s.id,source:'continuity'};await api('/api/project',{method:'POST',body:{style_profile:profile,style_enabled:true}});state.style_profile=profile;state.style_enabled=true;state.base_prompt=s.prompt;closeSkillDetail();setHubView('editor');setInspectorTab('generate');renderGenerate();toast(s.name+' applied to new generations','ok');return;}
-    if(s.type==='music'){musicSkillId=s.id;closeSkillDetail();setHubView('editor');setInspectorTab('generate');$('#genType').value='music';applyGenerationType();renderMusicSkills();$('#musicPrompt').focus();toast(s.name+' selected for music','ok');return;}
+    if(s.type==='music'){if(musicSkillId!==s.id)musicSkillCustomization='';musicSkillId=s.id;closeSkillDetail();setHubView('editor');setInspectorTab('generate');$('#genType').value='music';applyGenerationType();renderMusicSkills();$('#musicPrompt').focus();toast(s.name+' added to the music prompt','ok');return;}
     s.specification=specification;activePromptSkill=s;closeSkillDetail();setHubView('editor');setInspectorTab('generate');renderActivePromptSkill();$('#genPrompt').focus();toast(s.name+' attached to the prompt','ok');
   });
   const del=body.querySelector('#deleteProjectStyle');if(del)del.addEventListener('click',async()=>{if(!confirm('Delete this project style? New generations will stop using it if it is active.'))return;await api('/api/project/styles/'+encodeURIComponent(s.id),{method:'DELETE'});state.project_style_skills=(state.project_style_skills||[]).filter(x=>x.id!==s.id);if((state.style_profile||{}).skill_id===s.id){state.style_profile={name:'No project style',prompt:'',skill_id:null,source:'custom'};state.base_prompt='';}closeSkillDetail();renderSkillsCenter();toast('Project style deleted','ok');});

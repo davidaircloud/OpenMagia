@@ -43,6 +43,13 @@ Three skills compose songs instead of shots. They are marked `"type": "music"` i
 the catalog, so the Skill Center's ♫ filter, the Generate → Music skill row, and
 `/api/scenes` validation all agree about which workflows may touch a song.
 
+These workflows are authored for OpenMagia and grounded in the public YuE 2
+request surface; they are not OpenAI skills. Each catalog entry carries its
+source label, upstream URL, and a plain-language “use this when” description.
+The composer shows that provenance and lets the artist add a short per-song
+customization. That customization is appended to the immutable bundled
+contract, so it can focus the workflow without deleting its safeguards.
+
 | Skill | What it produces |
 |---|---|
 | `song-director` | A brief becomes a singable lyric with section tags, plus the style sentence that carries genre, instruments, vocal character, language and tempo. |
