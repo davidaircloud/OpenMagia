@@ -1454,7 +1454,7 @@ function renderSceneInsp(body, hint, id) {
       (band.length && band[1] ? '<br>YuE 2 sets the length · expect roughly ' + band[0] + '–' + band[1] + ' s' : '') +
       (sc.params && sc.params.instrumental ? '<br>No lead vocal (style direction, not a switch)' : '') +
       (mt.seconds ? '<br>Rendered: ' + (+mt.seconds).toFixed(1) + ' s of audio' + (mt.score ? ' · ABC score saved to media' : '') : '') +
-      (mt.truncated ? '<br><b>Hit the token ceiling, so no audio was kept</b>' : '') +
+      (mt.truncated ? (sceneMedia&&sceneMedia.src?'<br><b>This saved candidate is incomplete; its ending may be damaged.</b>':'<br><b>Hit the token ceiling, so no audio was kept.</b>') : '') +
       (mt.phase && mt.phase !== 'done' ? '<br>Stage: ' + esc(mt.phase) : '');
   } else
   d.innerHTML = 'Status: <b>' + (sc.status || 'idle') + '</b><br>Seed: ' + (sc.params && sc.params.seed) +

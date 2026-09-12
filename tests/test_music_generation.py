@@ -216,6 +216,7 @@ class Registry(unittest.TestCase):
         self.assertNotIn('id="musicManageBtn"', html)
         self.assertIn("m.kind==='audio'", script)
         self.assertIn("musicCompileFingerprint", script)
+        self.assertIn("This saved candidate is incomplete; its ending may be damaged.", script)
         self.assertIn("generateScrollTop", script)
         self.assertNotIn('class="musicCompileHead"', script)
         self.assertIn('class="musicValidationError"', script)
