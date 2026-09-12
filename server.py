@@ -1277,25 +1277,36 @@ def terminate_process_tree(proc, timeout=5):
     return True
 
 def model_update_fingerprint(component):
-    """Small source/checkpoint identity used to report update outcomes honestly."""
+    """Stable upstream identities; cache access times are deliberately ignored."""
+    repositories = []
     paths = []
     if component == "formatter":
-        paths = [ROOT / "addons" / "llama.cpp" / ".git" / "HEAD",
-                 DEFAULT_FORMATTER_MODEL, DEFAULT_FORMATTER_MODEL.with_name("qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf")]
+        repositories = [ROOT / "addons" / "llama.cpp"]
+        metadata = DEFAULT_FORMATTER_MODEL.parent / ".cache" / "huggingface" / "download"
+        paths = [metadata / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf.metadata",
+                 metadata / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf.metadata"]
     elif component == "yue":
-        paths = [YUE_LOCAL_DIR / "YuE" / ".git" / "HEAD", YUE_LOCAL_DIR / "YuE" / "pyproject.toml"]
+        repositories = [YUE_LOCAL_DIR / "YuE"]
         hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
-        paths += [hub / "models--m-a-p--YuE2-3B" / "refs" / "main",
-                  hub / "models--m-a-p--YuE2-Vae" / "refs" / "main"]
+        paths = [hub / "models--m-a-p--YuE2-3B" / "refs" / "main",
+                 hub / "models--m-a-p--YuE2-Vae" / "refs" / "main"]
     elif component == "h3":
-        paths = [ROOT / "h3.c" / ".git" / "HEAD", Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json",
+        repositories = [ROOT / "h3.c"]
+        paths = [Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json",
                  Path(H3_MODEL) / "Ref2VA" / "transformer" / "config.json"]
     identity = []
+    for repository in repositories:
+        try:
+            result = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True, timeout=5)
+            identity.append((str(repository), result.stdout.strip() if result.returncode == 0 else None))
+        except (OSError, subprocess.TimeoutExpired):
+            identity.append((str(repository), None))
     for path in paths:
         try:
-            stat = path.stat()
-            identity.append((str(path), stat.st_size, stat.st_mtime_ns,
-                             path.read_text(errors="replace")[:160] if stat.st_size < 4096 else ""))
+            # Hugging Face metadata/refs contain the remote commit and ETag.
+            # Their mtimes change on a successful no-op check, their contents do not.
+            identity.append((str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
         except OSError:
             identity.append((str(path), None))
     return identity

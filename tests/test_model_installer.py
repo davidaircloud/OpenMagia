@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,10 +61,24 @@ class ModelInstallerTests(unittest.TestCase):
         def completed(args, **kwargs):
             self.assertEqual(args[2:], ["--no-models", "--no-h3", "--update-sources"])
             return self.process("checking Qwen files\n")
-        with mock.patch.object(server.subprocess, "Popen", side_effect=completed):
+        with mock.patch.object(server.subprocess, "Popen", side_effect=completed), \
+             mock.patch.object(server, "model_update_fingerprint", return_value=[("revision", "same")]):
             server.install_model_component("formatter", update=True)
         self.assertEqual(server.model_installs["formatter"]["status"], "current")
         self.assertIn("latest", server.model_installs["formatter"]["message"])
+
+    def test_update_identity_ignores_cache_timestamp_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); metadata = root / "addons/models/qwen2.5-7b/.cache/huggingface/download"
+            metadata.mkdir(parents=True)
+            for name in ("qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf.metadata",
+                         "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf.metadata"):
+                (metadata / name).write_text("commit\netag\n")
+            with mock.patch.object(server, "ROOT", root), mock.patch.object(server, "DEFAULT_FORMATTER_MODEL", root / "addons/models/qwen2.5-7b/model.gguf"):
+                before = server.model_update_fingerprint("formatter")
+                for path in metadata.iterdir(): os.utime(path, None)
+                after = server.model_update_fingerprint("formatter")
+            self.assertEqual(before, after)
 
     def test_split_formatter_requires_every_shard(self):
         with tempfile.TemporaryDirectory() as folder:
