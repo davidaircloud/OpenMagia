@@ -23,9 +23,10 @@ WANT_FORMATTER=1
 WANT_MODELS=1
 WANT_H3=1
 LLAMA_DIR="${LLAMA_DIR:-$SCRIPT_DIR/addons/llama.cpp}"
-FORMATTER_DIR="${FORMATTER_DIR:-$SCRIPT_DIR/addons/models/qwen2.5-1.5b}"
-FORMATTER_MODEL="$FORMATTER_DIR/Qwen2.5-1.5B-Instruct.Q4_K_M.gguf"
-FORMATTER_REPO="${FORMATTER_REPO:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}"
+FORMATTER_DIR="${FORMATTER_DIR:-$SCRIPT_DIR/addons/models/qwen2.5-7b}"
+FORMATTER_MODEL="$FORMATTER_DIR/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+FORMATTER_MODEL_SECOND="$FORMATTER_DIR/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+FORMATTER_REPO="${FORMATTER_REPO:-Qwen/Qwen2.5-7B-Instruct-GGUF}"
 HF_VENV="${HF_VENV:-$SCRIPT_DIR/addons/huggingface-cli}"
 HF_COMMAND=""
 BUILD_VENV="${BUILD_VENV:-$SCRIPT_DIR/addons/build-tools}"
@@ -48,7 +49,7 @@ OpenMagia installer
   -m DIR     model root holding FL2VA/ and Ref2VA/ (default: ./models/MiniMax-H3)
   -r REPO    Hugging Face repo (default: $HF_REPO)
   --no-ref2va  skip the 144 GB Ref2VA download (FL2VA-only, first-frame mode)
-  --no-formatter  skip the ~1 GB local prompt formatter and llama.cpp runtime
+  --no-formatter  skip the ~4.7 GB local prompt formatter and llama.cpp runtime
   --no-models     skip MiniMax H3 checkpoint downloads
   --no-h3         skip downloading and building the H3 engine
   --with-yue      install the YuE 2 music runtime (Apple Silicon MPS or NVIDIA;
@@ -205,14 +206,13 @@ if [[ "$WANT_FORMATTER" -eq 1 ]]; then
     "$CMAKE_COMMAND" -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" -DGGML_METAL=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
     "$CMAKE_COMMAND" --build "$LLAMA_DIR/build" --config Release -j8 --target llama-cli
   fi
-  if [[ ! -f "$FORMATTER_MODEL" ]]; then
+  if [[ ! -f "$FORMATTER_MODEL" || ! -f "$FORMATTER_MODEL_SECOND" ]]; then
     mkdir -p "$FORMATTER_DIR"
-    log "downloading Qwen2.5 1.5B Q4 prompt formatter (~1 GB) ..."
-    hf_download "$FORMATTER_REPO" "qwen2.5-1.5b-instruct-q4_k_m.gguf" --local-dir "$FORMATTER_DIR"
-    downloaded="$FORMATTER_DIR/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    [[ -f "$downloaded" ]] && mv "$downloaded" "$FORMATTER_MODEL"
+    log "downloading Qwen2.5 7B Q4_K_M prompt formatter (~4.7 GB) ..."
+    hf_download "$FORMATTER_REPO" "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" --local-dir "$FORMATTER_DIR"
+    hf_download "$FORMATTER_REPO" "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf" --local-dir "$FORMATTER_DIR"
   fi
-  [[ -x "$FORMATTER_BIN" && -f "$FORMATTER_MODEL" ]] && log "local prompt formatter ready" || warn "formatter incomplete; deterministic H3 formatting remains available"
+  [[ -x "$FORMATTER_BIN" && -f "$FORMATTER_MODEL" && -f "$FORMATTER_MODEL_SECOND" ]] && log "local prompt formatter ready" || warn "formatter incomplete; deterministic H3 formatting remains available"
 fi
 
 # --- 3. config.json (early, so the app works while checkpoints download) ----

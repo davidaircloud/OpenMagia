@@ -114,7 +114,7 @@
       <div id="generationTypeNotice" class="generationTypeNotice" hidden></div>
       <div id="videoGenerationControls">
       <section class="projectStyleCard">
-        <div class="projectStyleTop"><div><span class="scopeLabel">SHARED INSTRUCTIONS</span></div><div class="styleActions"><button id="projectStyleToggle" class="transitionToggle on" type="button" role="switch" aria-checked="true" aria-label="Use shared instructions"><span></span></button></div></div>
+        <div class="projectStyleTop"><div><span class="scopeLabel">DIRECTION</span></div><div class="styleActions"><button id="projectStyleToggle" class="transitionToggle on" type="button" role="switch" aria-checked="true" aria-label="Use shared instructions"><span></span></button></div></div>
         <textarea class="txt" id="genStyle" placeholder="Instructions shared by every generated scene."></textarea>
         <div class="styleComposerBar"><button id="styleRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
       </section>
@@ -156,13 +156,13 @@
            negative-prompt field here, because the model has no such argument. -->
       <div id="musicGenerationControls" hidden>
         <section class="projectStyleCard">
-          <div class="projectStyleTop"><div><h3>Song direction</h3><small id="musicRuntimeHint">YuE 2 composer</small></div></div>
+          <div class="projectStyleTop"><div><span class="scopeLabel">DIRECTION</span><small id="musicRuntimeHint">YuE 2 composer</small></div></div>
           <textarea class="txt" id="musicPrompt" placeholder="Describe the song: genre, instruments, vocal character, language, intended tempo…"></textarea>
           <div class="styleComposerBar"><button id="musicRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
         </section>
         <section class="h3Composer">
           <div class="activePromptSkills" id="activeMusicSkill"></div>
-          <div class="fld musicLyricsField"><span>Lyrics <button id="musicLyricsRefineBtn" class="inlineRefine" type="button">✦ Write with model</button></span>
+          <div class="fld musicLyricsField"><span><span class="scopeLabel">LYRICS</span><button id="musicLyricsRefineBtn" class="inlineRefine" type="button">✦ Write with model</button></span>
             <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" aria-label="Lyrics" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
           </div>
           <div class="generationGrid musicGrid">

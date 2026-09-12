@@ -137,7 +137,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md), follow the [Code of Conduct](CODE_OF_CO
 
 ## Built with
 
-[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [YuE 2](https://github.com/multimodal-art-projection/YuE) by m-a-p · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · Qwen2.5
+[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [YuE 2](https://github.com/multimodal-art-projection/YuE) by m-a-p · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · [Qwen2.5 7B Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
 
 The Character Creator approach was inspired by [PoopMan333's H3 Character Sheet Generator](https://huggingface.co/PoopMan333/H3_Character_Sheet_Generator). OpenMagia is independent and is not affiliated with or endorsed by MiniMax or the projects above. Full attribution and component licenses are in [NOTICE.md](NOTICE.md).
 

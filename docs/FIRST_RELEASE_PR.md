@@ -35,7 +35,7 @@ opposite path:
   exactly where you look for them; nothing else competes for attention.
   The app is finished down to the details so it just works intuitively,
   without frills.
-- **Prompting with guardrails.** The local 1.5B formatter may expand your
+- **Prompting with guardrails.** The local 7B formatter interprets and expands your
   prose, but deterministic code owns MiniMax's official field names, ordering,
   and limits. Malformed model output can never reach the engine.
 
@@ -50,7 +50,7 @@ opposite path:
   with FL2VA only, it anchors the scene's first frame.
 - **Scene chaining** via last-frame extraction (`--first-frame`) for
   multi-shot continuity.
-- Optional **Qwen2.5-1.5B local formatter** (llama.cpp) for prose expansion —
+- Optional **Qwen2.5-7B local formatter** (llama.cpp, Q4_K_M, ~4.7 GB) for prose interpretation and expansion —
   schema-safe even when it's absent.
 
 ### Editing
@@ -76,7 +76,7 @@ opposite path:
 ```
  prompt sheet ──► h3_prompts.py ──► h3 (Metal) ──► clips
       ▲                │  deterministic fields,      │
- Qwen 1.5B (local,     │  labels, timing, limits     ▼
+ Qwen 7B (local,       │  labels, timing, limits     ▼
  prose expansion only) ┘                        media bin
                                                      │ drag
                                                      ▼
@@ -132,7 +132,7 @@ Standing on the shoulders of giants — with gratitude to:
   into references that can't disagree with each other.
 - **MiniMax AI** — the MiniMax-H3 model family.
 - **The ggml authors** — llama.cpp.
-- **The Qwen team (Alibaba Cloud)** — Qwen2.5-1.5B-Instruct.
+- **The Qwen team (Alibaba Cloud)** — Qwen2.5-7B-Instruct.
 - **FFmpeg contributors** — the invisible backbone of every export.
 
 OpenMagia is independent and not affiliated with any of the above. See

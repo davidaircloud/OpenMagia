@@ -100,13 +100,15 @@ SKILL_CATALOG_FILE = SKILL_ROOT / "catalog.json"
 PROJECTS = ROOT / "projects"
 ACTIVE_FILE = DATA / "active.json"
 CONFIG_FILE = ROOT / "config.json"
+DEFAULT_FORMATTER_MODEL = ROOT / "addons" / "models" / "qwen2.5-7b" / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+LEGACY_FORMATTER_MODEL = ROOT / "addons" / "models" / "qwen2.5-1.5b" / "Qwen2.5-1.5B-Instruct.Q4_K_M.gguf"
 
 DEFAULTS = {
     "h3_bin": str(ROOT / "h3.c" / "h3"),
     "model_root": str(ROOT / "models" / "MiniMax-H3"),
     "port": 8730,
     "formatter_bin": str(ROOT / "addons" / "llama.cpp" / "build" / "bin" / "llama-cli"),
-    "formatter_model": str(ROOT / "addons" / "models" / "qwen2.5-1.5b" / "Qwen2.5-1.5B-Instruct.Q4_K_M.gguf"),
+    "formatter_model": str(DEFAULT_FORMATTER_MODEL),
 }
 def _load_config():
     cfg = dict(DEFAULTS)
@@ -115,6 +117,13 @@ def _load_config():
             cfg.update(json.loads(CONFIG_FILE.read_text()))
         except Exception:
             pass
+    # Existing installs should follow the bundled refiner upgrade. Explicit
+    # environment variables and custom model sources remain authoritative.
+    try:
+        if Path(str(cfg["formatter_model"])).expanduser().resolve() == LEGACY_FORMATTER_MODEL.resolve():
+            cfg["formatter_model"] = str(DEFAULT_FORMATTER_MODEL)
+    except (KeyError, OSError, TypeError):
+        pass
     cfg["h3_bin"] = os.environ.get("H3_BIN", cfg["h3_bin"])
     cfg["model_root"] = os.environ.get("H3_MODEL", cfg["model_root"])
     cfg["port"] = int(os.environ.get("OPENMAGIA_PORT", cfg["port"]))
@@ -645,8 +654,20 @@ FORMATTER_MODEL = str(_saved_model_sources.get("formatter_model") or FORMATTER_M
 FORMATTER_ENDPOINT = str(_saved_model_sources.get("formatter_endpoint") or "")
 FORMATTER_MODEL_ID = str(_saved_model_sources.get("formatter_model_id") or "")
 
+def formatter_model_available(model_path):
+    """Require every shard when a configured GGUF is the first split file."""
+    path = Path(model_path).expanduser()
+    if not path.is_file():
+        return False
+    match = re.match(r"^(.*)-00001-of-(\d{5})\.gguf$", path.name, re.IGNORECASE)
+    if not match:
+        return True
+    shard_count = int(match.group(2))
+    return all(path.with_name(f"{match.group(1)}-{index:05d}-of-{shard_count:05d}.gguf").is_file()
+               for index in range(1, shard_count + 1))
+
 def formatter_available():
-    return bool(FORMATTER_ENDPOINT and FORMATTER_MODEL_ID) or (Path(FORMATTER_BIN).is_file() and Path(FORMATTER_MODEL).is_file())
+    return bool(FORMATTER_ENDPOINT and FORMATTER_MODEL_ID) or (Path(FORMATTER_BIN).is_file() and formatter_model_available(FORMATTER_MODEL))
 
 def run_formatter_command(cmd, timeout=90):
     """Run the configured formatter through llama.cpp or a local OpenAI API."""
@@ -790,6 +811,12 @@ def normalize_music_brief_text(value):
             seen.add(key)
     return " ".join(kept)
 
+def sanitize_music_refined_style(value):
+    """Remove formatter bookkeeping that is not musical direction for YuE."""
+    sentences = re.split(r"(?<=[.!?])\s+", normalize_music_brief_text(value))
+    blocked = re.compile(r"\bplan[_ ]?mode\b|\binstrumentals? (?:are|is|should be)?\s*(?:on|off)\b", re.I)
+    return " ".join(sentence for sentence in sentences if not blocked.search(sentence)).strip()
+
 
 def music_vocal_intent(idea):
     """Read explicit vocal wording, giving a requested vocal priority over 'instrumental'."""
@@ -834,8 +861,11 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     instruction = (
         "You are a music producer. Return JSON only with keys style, instrumental, and plan_mode. "
         + vocal_rule +
-        "Rewrite BRIEF into one richer production brief. Preserve every named instrument, rhythm, texture, mood, tempo, and use. "
-        "Add compatible section development, instrument roles, dynamics, stereo space, and vocal placement. Do not repeat sentences or output category labels. "
+        "Rewrite BRIEF into a detailed 70–110 word production brief. Restate every named instrument, rhythm, texture, mood, tempo, and intended use. "
+        "Add compatible section development, instrument roles, dynamics, stereo space, and vocal placement. "
+        "The style value must contain musical and production direction only and stand alone as the complete instruction sent to a music generator. "
+        "Describe requested vocals by character, placement, and frequency. Never mention JSON fields, booleans, switches, plan_mode, or whether instrumentals are on or off inside style. "
+        "Do not repeat sentences or output category labels. "
         "Set plan_mode to full for vocals and off for instrumental music without a supplied score.\n"
         f"SKILL: {direction}\nBRIEF: {idea}")
     cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "700", "--temp", "0.3",
@@ -843,7 +873,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     try:
         run = run_formatter_command(cmd, timeout=90)
         data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
-        style, refined_lyrics = str(data.get("style") or "").strip(), lyrics
+        style, refined_lyrics = sanitize_music_refined_style(data.get("style") or ""), lyrics
         if instrumental:
             # Vocals are never allowed to sneak back in for an instrumental brief,
             # and a collapsed one-word style (e.g. just "Instrumental") must never
@@ -932,6 +962,30 @@ def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
     raise ValueError("The refinement model could not produce a lyric draft. Try again or adjust the song direction.")
 
 
+def music_title_fallback(idea, lyrics=""):
+    """Deterministic label when the title model is unavailable or returns junk.
+    Never returns a punctuation-only string like '...'."""
+    for src in (str(idea or "").strip(), str(lyrics or "").strip()):
+        if not src:
+            continue
+        # Prefer the first substantive line; drop section tags like [Verse].
+        line = src
+        for candidate in src.splitlines():
+            cleaned = re.sub(r"^\s*\[[^\]]*\]\s*", "", candidate).strip()
+            if re.search(r"[A-Za-z]", cleaned):
+                line = cleaned
+                break
+        words = re.findall(r"[A-Za-z][A-Za-z'’-]*", line)
+        if words:
+            return (" ".join(words[:5]).title())[:60]
+    return ""
+
+
+def _title_is_usable(title):
+    """A real title must contain at least one letter (reject '...', '…', '??')."""
+    return bool(re.search(r"[^\W\d_]", title or "", re.U))
+
+
 def generate_music_title(idea, lyrics="", skill_id=""):
     """Create a compact library title without using the request itself as a label."""
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
@@ -951,11 +1005,14 @@ def generate_music_title(idea, lyrics="", skill_id=""):
     try:
         run = run_formatter_command(cmd, timeout=45)
         data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
-        title = re.sub(r"\s+", " ", str(data.get("title") or "")).strip(" \t\r\n\"'“”‘’")
-        if run.returncode == 0 and 2 <= len(title) <= 60 and len(title.split()) <= 8:
+        title = re.sub(r"\s+", " ", str(data.get("title") or "")).strip(" \t\r\n\"'“”‘’…").strip(" .·•")
+        if (run.returncode == 0 and _title_is_usable(title)
+                and 2 <= len(title) <= 60 and len(title.split()) <= 8):
             return {"title": title, "used_ai": True}
     except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
         pass
+    # The model returned nothing usable (empty, or junk like "..."); fall back to
+    # a deterministic label instead of letting a punctuation-only name through.
     return {"title": "", "used_ai": False}
 
 def discover_model_sources():

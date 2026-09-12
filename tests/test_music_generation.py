@@ -330,6 +330,13 @@ class Skills(unittest.TestCase):
             result = server.generate_music_title("This entire prompt must not become the title")
         self.assertEqual(result, {"title": "", "used_ai": False})
 
+    def test_refined_music_style_removes_model_bookkeeping(self):
+        value = ("Warm keys bloom into a restrained chorus. "
+                 "The instrumental section uses upright bass. Plan_mode: full. "
+                 "Instrumentals are off.")
+        self.assertEqual(server.sanitize_music_refined_style(value),
+                         "Warm keys bloom into a restrained chorus. The instrumental section uses upright bass.")
+
     def test_installed_runtime_requires_both_checkpoint_caches(self):
         runtime = server.yue_local_runtime()
         self.assertIn("installed", runtime)

@@ -1,4 +1,5 @@
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -54,6 +55,31 @@ class ModelInstallerTests(unittest.TestCase):
             server.install_model_component("formatter")
         self.assertFalse(Path(captured["snapshot"]).exists())
         self.assertEqual(server.model_installs["formatter"]["status"], "ready")
+
+    def test_split_formatter_requires_every_shard(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = root / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+            second = root / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+            first.touch()
+            self.assertFalse(server.formatter_model_available(first))
+            second.touch()
+            self.assertTrue(server.formatter_model_available(first))
+
+    def test_bundled_formatter_is_qwen_7b(self):
+        installer = (server.ROOT / "install.sh").read_text()
+        interface = (server.ROOT / "app.js").read_text()
+        self.assertIn("Qwen2.5-7B-Instruct-GGUF", installer)
+        self.assertIn("qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", installer)
+        self.assertIn("qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", installer)
+        self.assertIn("Qwen2.5 7B", interface)
+        self.assertNotIn("Qwen2.5 1.5B", interface)
+
+    def test_refinement_model_is_visible_with_installed_models(self):
+        interface = (server.ROOT / "app.js").read_text()
+        self.assertIn("Qwen2.5 7B Instruct", interface)
+        self.assertIn("Prompt refinement · 4.7 GB", interface)
+        self.assertIn("Install Prompt refinement in Models to use Refine.", interface)
 
     def test_runtime_snapshot_skips_models_and_h3(self):
         def completed(args, **kwargs):

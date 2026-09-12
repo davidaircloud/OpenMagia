@@ -26,10 +26,10 @@ OpenMagia would not exist without them.
 - Role: cloned and built by `install.sh` into `addons/llama.cpp/`; runs the
   optional local prose-expansion model.
 
-### Qwen2.5-1.5B-Instruct (GGUF quantization)
-- Upstream: <https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF>
+### Qwen2.5-7B-Instruct (GGUF quantization)
+- Upstream: <https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF>
 - License: Apache License 2.0 — Copyright the Qwen team (Alibaba Cloud)
-- Role: optional ~1 GB local model that expands the user's prose before
+- Role: optional ~4.7 GB local model that interprets and expands the user's prose before
   deterministic H3 formatting wraps it.
 
 ### YuE 2 song generation
@@ -89,7 +89,7 @@ OpenMagia would not exist without them.
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-### Apache License 2.0 (Qwen2.5-1.5B-Instruct)
+### Apache License 2.0 (Qwen2.5-7B-Instruct)
 
 The full text is published at <https://www.apache.org/licenses/LICENSE-2.0>
 and in the model repository linked above.
