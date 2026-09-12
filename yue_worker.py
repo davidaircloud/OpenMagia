@@ -405,10 +405,11 @@ def parse_args():
     parser.add_argument("--yue-cli", default="", help="Path to the yue2 executable, when it is not on PATH")
     parser.add_argument("--command", default=os.environ.get("YUE_WORKER_COMMAND", ""),
                         help="Full override, e.g. 'python -m yue' for a forked runtime")
-    parser.add_argument("--max-tokens", type=int, default=6000,
+    parser.add_argument("--max-tokens", type=int, default=0,
                         help="Stop a song whose stage streams more tokens than this (0 = no "
                              "ceiling). YuE 2 has no duration argument, so this is the only guard "
-                             "against a cue that never ends; 6000 is about four minutes.")
+                             "against a cue that never ends. Disabled by default so YuE's native "
+                             "token budget and truncation receipt remain authoritative.")
     parser.add_argument("--extra-arg", action="append", default=[],
                         help="Extra argument for 'yue2 generate' (repeatable); never accepted from clients")
     parser.add_argument("--keep", type=int, default=72, help="Hours to keep finished songs")

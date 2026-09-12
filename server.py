@@ -551,8 +551,22 @@ def model_management_state():
                        "path":str(YUE_LOCAL_DIR.resolve()), "managed":True, "receipt":receipt,
                        "imported":True, "media":"music"}
         installations.append(yue_install); _save_model_registry(registry)
+    formatter_path = Path(FORMATTER_MODEL).expanduser().resolve()
+    formatter_root = formatter_path.parent
+    formatter_install = next((item for item in installations if item.get("backend_id") == "qwen2.5-7b"), None)
+    managed_formatter_root = (ROOT / "addons" / "models" / "qwen2.5-7b").resolve()
+    if formatter_root == managed_formatter_root and formatter_model_available(formatter_path) and not formatter_install:
+        formatter_install = {"id":"install-qwen2-5-7b-managed", "backend_id":"qwen2.5-7b",
+                             "name":"Qwen2.5 7B Instruct", "path":str(formatter_root),
+                             "managed":True,
+                             "receipt":[str(formatter_root)], "imported":True, "media":"refinement"}
+        installations.append(formatter_install); _save_model_registry(registry)
     for item in installations:
-        item["active"] = (item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or item.get("path") == active_path
+        item["active"] = ((item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or
+                          item.get("path") == active_path or
+                          (item.get("backend_id") == "qwen2.5-7b" and
+                           Path(item.get("path") or "").resolve() == formatter_root and
+                           formatter_model_available(formatter_path)))
         item["available"] = Path(item.get("path") or "").exists()
     hw = hardware_profile(); platform_id = hw["platform"]
     catalog = []
@@ -576,7 +590,7 @@ def model_management_state():
             "music":music}
 
 def uninstall_managed_model(installation_id):
-    global H3_MODEL
+    global H3_MODEL, FORMATTER_MODEL
     registry = _load_model_registry(); items = registry.get("installations") or []
     item = next((x for x in items if x.get("id") == installation_id), None)
     if not item: raise ValueError("Managed installation not found.")
@@ -596,6 +610,20 @@ def uninstall_managed_model(installation_id):
         registry["installations"] = [x for x in items if x.get("id") != installation_id]
         _save_model_registry(registry); MUSIC_HEALTH_CACHE.clear()
         return {"ok":True, "removed":targets, "active_removed":True}
+    if item.get("backend_id") == "qwen2.5-7b":
+        target = Path(item.get("path") or "").resolve()
+        allowed = (ROOT / "addons" / "models" / "qwen2.5-7b").resolve()
+        receipt = {str(Path(value).resolve()) for value in item.get("receipt") or []}
+        if not item.get("managed") or target != allowed or str(target) not in receipt:
+            raise ValueError("OpenMagia has no safe managed Qwen installation receipt.")
+        if target.exists(): shutil.rmtree(target)
+        registry["installations"] = [x for x in items if x.get("id") != installation_id]
+        _save_model_registry(registry)
+        FORMATTER_MODEL = str(DEFAULT_FORMATTER_MODEL)
+        _saved_model_sources.pop("formatter_model", None)
+        MODEL_SOURCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MODEL_SOURCE_FILE.write_text(json.dumps(_saved_model_sources, indent=2) + "\n")
+        return {"ok":True, "removed":str(target), "active_removed":True}
     target = Path(item.get("path") or "").resolve()
     was_active = str(target) == str(Path(H3_MODEL).expanduser().resolve())
     managed_root = (ROOT / "models").resolve()
@@ -1248,15 +1276,19 @@ def terminate_process_tree(proc, timeout=5):
                 pass
     return True
 
-def install_model_component(component):
+def install_model_component(component, update=False):
     """Run an immutable snapshot of the idempotent installer in the background."""
     model_installs[component] = {"status": "running", "message": "Preparing download…"}
     if component == "h3":
         flags = ["--no-formatter"]
     elif component == "yue":
-        flags = ["--no-models", "--no-h3", "--with-yue"]
-    else:
+        flags = ["--no-models", "--no-h3", "--no-formatter", "--with-yue"]
+    elif component == "formatter":
         flags = ["--no-models", "--no-h3"]
+    else:
+        flags = ["--no-models", "--no-h3", "--no-formatter"]
+    if update:
+        flags.append("--update-sources")
     snapshot = None
     try:
         # Bash may read a long-running script incrementally. Running a private
@@ -5350,7 +5382,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Claim the component before starting the worker. Previously
                 # quick clicks could launch installers into the same files.
                 model_installs[component] = {"status": "running", "message": "Preparing download…"}
-            threading.Thread(target=install_model_component, args=(component,), daemon=True).start()
+            update = bool(b.get("update"))
+            threading.Thread(target=install_model_component, args=(component, update), daemon=True).start()
             return self._json({"ok": True, "status": "running"})
         if p == "/api/music/preview":
             # Compile only: what YuE 2 will actually receive, plus what the compiler
@@ -5848,9 +5881,13 @@ class Handler(BaseHTTPRequestHandler):
                               "sung_lines": len(yue_prompts.lyric_lines(params.get("lyrics") or "")),
                               "estimated_band": list(yue_prompts.estimate_song_band(params.get("lyrics") or "")),
                               "score": bool(params.get("abc"))}
-            proj["scenes"].append(s)
-            proj["order"].append(sid)
-            save_project(proj)
+            # The music worker also saves progress. Reload and append under the
+            # same lock so an older worker snapshot cannot erase this scene.
+            with lock:
+                latest = load_project()
+                latest["scenes"].append(s)
+                latest["order"].append(sid)
+                save_project(latest)
             return self._json(s)
 
         if p == "/api/prompt/custom-skill":

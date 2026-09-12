@@ -22,6 +22,7 @@ WANT_REF2VA=1
 WANT_FORMATTER=1
 WANT_MODELS=1
 WANT_H3=1
+UPDATE_SOURCES=0
 LLAMA_DIR="${LLAMA_DIR:-$SCRIPT_DIR/addons/llama.cpp}"
 FORMATTER_DIR="${FORMATTER_DIR:-$SCRIPT_DIR/addons/models/qwen2.5-7b}"
 FORMATTER_MODEL="$FORMATTER_DIR/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
@@ -52,6 +53,7 @@ OpenMagia installer
   --no-formatter  skip the ~4.7 GB local prompt formatter and llama.cpp runtime
   --no-models     skip MiniMax H3 checkpoint downloads
   --no-h3         skip downloading and building the H3 engine
+  --update-sources  check configured upstream sources and download changed files
   --with-yue      install the YuE 2 music runtime (Apple Silicon MPS or NVIDIA;
                   ~8 GB of weights; --no-yue-weights skips the download)
   --no-yue-weights  with --with-yue, install the runtime but fetch no checkpoint
@@ -68,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --no-formatter) WANT_FORMATTER=0; shift;;
     --no-models) WANT_MODELS=0; shift;;
     --no-h3) WANT_H3=0; shift;;
+    --update-sources) UPDATE_SOURCES=1; shift;;
     --with-yue) WANT_YUE=1; shift;;
     --no-yue-weights) WANT_YUE_WEIGHTS=0; shift;;
     -h|--help) usage; exit 0;;
@@ -177,13 +180,17 @@ ensure_ffmpeg
 H3_BIN="$H3C_DIR/h3"
 if [[ "$WANT_H3" -eq 0 ]]; then
   log "skipping H3 engine"
-elif [[ -x "$H3_BIN" ]]; then
+elif [[ -x "$H3_BIN" && "$UPDATE_SOURCES" -eq 0 ]]; then
   log "h3 engine found: $H3_BIN"
 else
   if [[ ! -d "$H3C_DIR" ]]; then
     have git || { err "git is required to install the H3 engine"; exit 1; }
     log "downloading the H3 engine ..."
     git clone --depth 1 https://github.com/antirez/h3.c.git "$H3C_DIR"
+  fi
+  if [[ "$UPDATE_SOURCES" -eq 1 && -d "$H3C_DIR/.git" ]]; then
+    log "checking the H3 engine source for updates ..."
+    git -C "$H3C_DIR" pull --ff-only
   fi
   have make || { err "make is required to build h3"; exit 1; }
   log "building h3 from $H3C_DIR ..."
@@ -195,7 +202,11 @@ fi
 # --- 2. lightweight local prompt formatter ----------------------------------
 FORMATTER_BIN="$LLAMA_DIR/build/bin/llama-cli"
 if [[ "$WANT_FORMATTER" -eq 1 ]]; then
-  if [[ ! -x "$FORMATTER_BIN" ]]; then
+  if [[ "$UPDATE_SOURCES" -eq 1 && -d "$LLAMA_DIR/.git" ]]; then
+    log "checking the prompt runtime source for updates ..."
+    git -C "$LLAMA_DIR" pull --ff-only
+  fi
+  if [[ ! -x "$FORMATTER_BIN" || "$UPDATE_SOURCES" -eq 1 ]]; then
     if [[ ! -d "$LLAMA_DIR/.git" ]]; then
       have git || { err "git is required to install the local formatter"; exit 1; }
       log "cloning llama.cpp prompt runtime ..."
@@ -206,9 +217,9 @@ if [[ "$WANT_FORMATTER" -eq 1 ]]; then
     "$CMAKE_COMMAND" -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" -DGGML_METAL=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
     "$CMAKE_COMMAND" --build "$LLAMA_DIR/build" --config Release -j8 --target llama-cli
   fi
-  if [[ ! -f "$FORMATTER_MODEL" || ! -f "$FORMATTER_MODEL_SECOND" ]]; then
+  if [[ ! -f "$FORMATTER_MODEL" || ! -f "$FORMATTER_MODEL_SECOND" || "$UPDATE_SOURCES" -eq 1 ]]; then
     mkdir -p "$FORMATTER_DIR"
-    log "downloading Qwen2.5 7B Q4_K_M prompt formatter (~4.7 GB) ..."
+    log "checking Qwen2.5 7B Q4_K_M files ..."
     hf_download "$FORMATTER_REPO" "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" --local-dir "$FORMATTER_DIR"
     hf_download "$FORMATTER_REPO" "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf" --local-dir "$FORMATTER_DIR"
   fi
@@ -266,6 +277,20 @@ else
   if [[ ! -f "$YUE_SRC_DIR/pyproject.toml" ]]; then
     log "downloading the YuE 2 runtime ..."
     git clone --depth 1 https://github.com/multimodal-art-projection/YuE.git "$YUE_SRC_DIR"
+  elif [[ "$UPDATE_SOURCES" -eq 1 && -d "$YUE_SRC_DIR/.git" ]]; then
+    log "checking the YuE 2 runtime source for updates ..."
+    git -C "$YUE_SRC_DIR" pull --ff-only
+  elif [[ "$UPDATE_SOURCES" -eq 1 ]]; then
+    # Older managed installs were copied without Git metadata. Refresh through
+    # a complete temporary checkout so a failed download leaves the live source.
+    YUE_REFRESH="$YUE_DIR/YuE.refresh"
+    YUE_PREVIOUS="$YUE_DIR/YuE.previous"
+    rm -rf "$YUE_REFRESH" "$YUE_PREVIOUS"
+    log "refreshing the YuE 2 runtime source ..."
+    git clone --depth 1 https://github.com/multimodal-art-projection/YuE.git "$YUE_REFRESH"
+    mv "$YUE_SRC_DIR" "$YUE_PREVIOUS"
+    mv "$YUE_REFRESH" "$YUE_SRC_DIR"
+    rm -rf "$YUE_PREVIOUS"
   fi
   if [[ ! -x "$YUE_VENV/bin/python" ]]; then
     # The upstream quickstart uses 3.12; anything 3.10+ imports fine.
@@ -284,7 +309,7 @@ else
       "$YUE_PYTHON" -m venv "$YUE_VENV"
     fi
   fi
-  if [[ ! -x "$YUE_VENV/bin/yue2" ]]; then
+  if [[ ! -x "$YUE_VENV/bin/yue2" || "$UPDATE_SOURCES" -eq 1 ]]; then
     log "installing the YuE 2 runtime (torch + transformers, a few GB) ..."
     if have uv; then
       uv pip install --python "$YUE_VENV/bin/python" "$YUE_SRC_DIR"

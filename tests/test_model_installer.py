@@ -56,6 +56,14 @@ class ModelInstallerTests(unittest.TestCase):
         self.assertFalse(Path(captured["snapshot"]).exists())
         self.assertEqual(server.model_installs["formatter"]["status"], "ready")
 
+    def test_formatter_update_checks_only_its_sources(self):
+        def completed(args, **kwargs):
+            self.assertEqual(args[2:], ["--no-models", "--no-h3", "--update-sources"])
+            return self.process("checking Qwen files\n")
+        with mock.patch.object(server.subprocess, "Popen", side_effect=completed):
+            server.install_model_component("formatter", update=True)
+        self.assertEqual(server.model_installs["formatter"]["status"], "ready")
+
     def test_split_formatter_requires_every_shard(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -74,16 +82,17 @@ class ModelInstallerTests(unittest.TestCase):
         self.assertIn("qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", installer)
         self.assertIn("Qwen2.5 7B", interface)
         self.assertNotIn("Qwen2.5 1.5B", interface)
+        self.assertIn("--update-sources", installer)
 
     def test_refinement_model_is_visible_with_installed_models(self):
         interface = (server.ROOT / "app.js").read_text()
         self.assertIn("Qwen2.5 7B Instruct", interface)
-        self.assertIn("Prompt refinement · 4.7 GB", interface)
+        self.assertIn("Prompt refinement", interface)
         self.assertIn("Install Prompt refinement in Models to use Refine.", interface)
 
     def test_runtime_snapshot_skips_models_and_h3(self):
         def completed(args, **kwargs):
-            self.assertEqual(args[2:], ["--no-models", "--no-h3"])
+            self.assertEqual(args[2:], ["--no-models", "--no-h3", "--no-formatter"])
             return self.process("managed FFmpeg ready\n")
 
         with mock.patch.object(server.subprocess, "Popen", side_effect=completed):

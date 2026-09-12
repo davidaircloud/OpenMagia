@@ -12,6 +12,7 @@ class ModelManagementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(server, "MODEL_REGISTRY_FILE", Path(td) / "registry.json"), \
              mock.patch.object(server, "H3_MODEL", str(Path(td) / "missing-model")), \
+             mock.patch.object(server, "FORMATTER_MODEL", str(Path(td) / "missing-formatter.gguf")), \
              mock.patch.object(server, "yue_local_runtime", return_value={
                  "installed": False, "present": False, "ready": False,
                  "device": "", "reason": "not installed",
@@ -113,6 +114,25 @@ class ModelManagementTests(unittest.TestCase):
             self.assertTrue(result["active_removed"])
             self.assertFalse(runtime.exists())
             self.assertTrue(all(not path.exists() for path in weights))
+            self.assertTrue(unrelated.exists())
+
+    def test_qwen_uninstall_removes_only_managed_model_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); target = root / "addons" / "models" / "qwen2.5-7b"
+            target.mkdir(parents=True); (target / "model.gguf").touch()
+            unrelated = root / "addons" / "models" / "keep"; unrelated.mkdir()
+            registry = root / "registry.json"
+            registry.write_text(json.dumps({"installations":[{"id":"install-qwen", "backend_id":"qwen2.5-7b",
+                "path":str(target), "managed":True, "receipt":[str(target), str(unrelated)]}], "loras":[]}))
+            sources = root / "sources.json"
+            with mock.patch.object(server, "ROOT", root), mock.patch.object(server, "MODEL_REGISTRY_FILE", registry), \
+                 mock.patch.object(server, "MODEL_SOURCE_FILE", sources), \
+                 mock.patch.object(server, "DEFAULT_FORMATTER_MODEL", target / "model.gguf"), \
+                 mock.patch.object(server, "FORMATTER_MODEL", str(target / "model.gguf")), \
+                 mock.patch.object(server, "_saved_model_sources", {"formatter_model":str(target / "model.gguf")}):
+                result = server.uninstall_managed_model("install-qwen")
+            self.assertTrue(result["active_removed"])
+            self.assertFalse(target.exists())
             self.assertTrue(unrelated.exists())
 
 
