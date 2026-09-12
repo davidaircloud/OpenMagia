@@ -176,6 +176,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(backend["media"], "music")
         self.assertEqual(backend["role"], "music_generation")
         self.assertNotIn("vram_min", backend)   # MPS has no VRAM to require
+        self.assertEqual("openmagia-yue-worker/" + server.YUE_WORKER_VERSION, yue_worker.VERSION)
 
     def test_management_state_reports_a_music_source(self):
         state = server.model_management_state()

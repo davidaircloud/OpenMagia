@@ -190,7 +190,7 @@ YUE_MODEL = yue_prompts.YUE_MODEL_ID
 YUE_VAE = yue_prompts.YUE_VAE_ID
 YUE_LOCAL_DIR = ROOT / "addons" / "yue"
 YUE_LOCAL_VENV = YUE_LOCAL_DIR / "runtime"
-YUE_WORKER_VERSION = "1"
+YUE_WORKER_VERSION = "2"
 MUSIC_TIMEOUT = float(os.environ.get("OPENMAGIA_MUSIC_TIMEOUT", "20"))
 MUSIC_STALL_TIMEOUT = int(os.environ.get("OPENMAGIA_MUSIC_STALL_TIMEOUT", "900"))
 MUSIC_POLL_SECONDS = 2.0
@@ -363,8 +363,16 @@ def ensure_local_worker(wait=MUSIC_LOCAL_BOOT):
         _music_worker["proc"] = None
     if not proc:
         health = music_worker_health(url, timeout=2.0)
-        if health.get("ok"):
+        if health.get("ok") and health.get("version") == "openmagia-yue-worker/" + YUE_WORKER_VERSION:
             return health
+        if health.get("ok"):
+            try:
+                request = urllib.request.Request(url + "/shutdown", data=b"{}", method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(request, timeout=4.0).read()
+                time.sleep(.5)
+            except (urllib.error.URLError, OSError):
+                pass
     if not proc:
         runtime = yue_local_runtime()
         if not runtime["present"]:
@@ -402,6 +410,14 @@ def stop_local_worker():
     proc = _music_worker.get("proc")
     log = _music_worker.get("log")
     _music_worker["proc"] = None
+    if not proc:
+        try:
+            request = urllib.request.Request(f"http://127.0.0.1:{MUSIC_LOCAL_PORT}/shutdown",
+                                             data=b"{}", method="POST",
+                                             headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(request, timeout=4.0).read()
+        except (urllib.error.URLError, OSError):
+            pass
     if proc and proc.poll() is None:
         try:
             if os.name != "nt":

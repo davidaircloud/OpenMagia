@@ -43,7 +43,7 @@ from pathlib import Path
 
 DEFAULT_MODEL = os.environ.get("YUE2_MODEL", "m-a-p/YuE2-3B")
 DEFAULT_VAE = os.environ.get("YUE2_VAE", "m-a-p/YuE2-Vae")
-VERSION = "openmagia-yue-worker/1"
+VERSION = "openmagia-yue-worker/2"
 TERMINAL = ("ready", "error", "cancelled")
 MAX_BODY = 4 * 1024 * 1024
 
@@ -480,6 +480,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._send(401, {"error": "Missing or incorrect access token."})
         path = self.path.split("?")[0]
+        if path == "/shutdown":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._send(403, {"error": "Shutdown is available on loopback only."})
+            self._send(200, {"ok": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if path != "/v1/music":
             return self._send(404, {"error": "Not found."})
         try:
