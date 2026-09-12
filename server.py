@@ -3532,6 +3532,24 @@ def repair_timeline_overlaps(project):
     return changed
 
 
+def cleanup_timeline(project):
+    """Repair invalid overlaps and align the earliest clip with 0:00."""
+    before = {clip.get("id"): float(clip.get("start", 0))
+              for track in project.get("tracks", []) for clip in track.get("clips", [])}
+    repair_timeline_overlaps(project)
+    clips = [clip for track in project.get("tracks", []) for clip in track.get("clips", [])]
+    earliest = min((max(0.0, float(clip.get("start", 0))) for clip in clips), default=0.0)
+    if earliest > 1e-6:
+        for clip in clips:
+            clip["start"] = round(max(0.0, float(clip.get("start", 0)) - earliest), 6)
+    changed_ids = [clip.get("id") for clip in clips
+                   if abs(float(clip.get("start", 0)) - before.get(clip.get("id"), 0.0)) > 1e-6]
+    overlap_repairs = sum(1 for clip in clips
+                          if float(clip.get("start", 0)) + earliest > before.get(clip.get("id"), 0.0) + 1e-6)
+    return {"changed": len(changed_ids), "clips": len(clips),
+            "shifted_by": round(earliest, 6), "overlaps_repaired": overlap_repairs}
+
+
 def _timeline_magia_number(seed, key, modulo=10000):
     digest = hashlib.sha256(f"{int(seed)}:{key}".encode()).hexdigest()
     return int(digest[:12], 16) % modulo
@@ -3957,13 +3975,9 @@ def apply_timeline_magia_plan(project, plan):
                 clip[key] = value
         applied += 1
     if scope == "timeline":
-        all_clips = [clip for track in project.get("tracks", []) for clip in track.get("clips", [])]
-        if all_clips:
-            earliest = min(max(0.0, float(clip.get("start", 0))) for clip in all_clips)
-            if earliest > 1e-6:
-                for clip in all_clips:
-                    clip["start"] = round(max(0.0, float(clip.get("start", 0)) - earliest), 6)
-    repair_timeline_overlaps(project)
+        cleanup_timeline(project)
+    else:
+        repair_timeline_overlaps(project)
     project["timelineMagia"] = {
         "recipe_id": plan.get("recipe_id") or "",
         "profile": plan.get("profile") or "",
@@ -5445,6 +5459,14 @@ class Handler(BaseHTTPRequestHandler):
                     plan["applied"] = apply_timeline_magia_plan(proj, plan)
                     save_project(proj)
             return self._json(plan)
+
+        if p == "/api/timeline/cleanup":
+            with lock:
+                proj = load_project()
+                push_timeline_undo(proj)
+                result = cleanup_timeline(proj)
+                save_project(proj)
+            return self._json({"ok": True, **result})
 
         if p == "/api/undo":
             with lock:

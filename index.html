@@ -164,7 +164,6 @@
           <div class="activePromptSkills" id="activeMusicSkill"></div>
           <div class="fld musicLyricsField"><span>Lyrics <button id="musicLyricsRefineBtn" class="inlineRefine" type="button">✦ Write with model</button></span>
             <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" aria-label="Lyrics" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
-            <small>Section tags such as <code>[Verse]</code> or <code>[Chorus]</code> are kept; the model is trained on them. Lyrics are sent exactly as written — only Markdown headings and production notes are taken out, and the review sheet lists what was.</small>
           </div>
           <div class="generationGrid musicGrid">
             <div class="field"><label>Structure <span class="info" tabindex="0" role="img" aria-label="About song planning" data-tooltip="Full plan writes a score before the audio and gives instrumental songs a musical ending. Melody plans a shorter score. Direct generation is available for songs with sung lyrics.">i</span></label>
@@ -210,7 +209,7 @@
     <div class="tltool"><button id="freezeBtn" title="Freeze frame at playhead">❄</button><span>Freeze</span></div>
     <div class="tltool"><button id="frameBtn" title="Extract the frame at the playhead into the media bin">▣</button><span>Frame</span></div>
     <div class="tltool" id="detachAudioTool" hidden><button id="detachAudioBtn" title="Detach audio from selected clip" aria-label="Detach audio"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 7v10M12 5v14M16 8v8M20 10v4"/><path d="M5 20 19 4"/></svg></button><span>Detach audio</span></div>
-    <div class="tltool tlZoom"><button id="zoomOut" title="Zoom out (−)">−</button><input type="range" id="zoomSlider" class="zoomSlider" min="20" max="400" step="2" value="100" title="Timeline zoom" aria-label="Timeline zoom"><span class="zoomval" id="zoomVal">1×</span><button id="zoomIn" title="Zoom in (+)">＋</button></div>
+    <div class="tltool tlZoom"><button id="zoomOut" title="Zoom out (−)">−</button><input type="range" id="zoomSlider" class="zoomSlider" min="5" max="400" step="5" value="100" title="Timeline zoom" aria-label="Timeline zoom"><span class="zoomval" id="zoomVal">1×</span><button id="zoomIn" title="Zoom in (+)">＋</button></div>
     <div class="tltool"><button id="tlMaxBtn" title="Maximize / minimize the timeline (double-click the Timeline title)" aria-label="Expand timeline"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.25 3.75h-3.5v3.5M12.75 16.25h3.5v-3.5M3.9 7.1l3.2-3.2m5.8 12.2 3.2-3.2"/></svg></button><span id="tlMaxLabel">Expand</span></div>
     <div class="tltool"><button id="addVTrack" title="Add a video track (overlays stack on top)">＋V</button><span>Video</span></div>
     <div class="tltool"><button id="addATrack" title="Add an audio track">＋A</button><span>Audio</span></div>
@@ -251,7 +250,7 @@
       <div id="timelineMagiaPlan" class="timelineMagiaPlan" aria-live="polite"></div>
       <section id="timelineMagiaExamples" class="timelineMagiaExamples" hidden></section>
     </div>
-    <div class="sheetFoot timelineMagiaFoot"><button id="timelineMagiaCancel" class="btn ghost">Cancel</button><button id="timelineMagiaRemix" class="btn ghost">Remix</button><button id="timelineMagiaApply" class="btn primary">Apply effects</button></div>
+    <div class="sheetFoot timelineMagiaFoot"><button id="timelineMagiaCancel" class="btn ghost">Cancel</button><button id="timelineMagiaCleanup" class="btn ghost">Clean up timeline</button><button id="timelineMagiaApply" class="btn primary">Apply effects</button></div>
   </aside>
 </div>
 

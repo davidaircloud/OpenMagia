@@ -219,7 +219,10 @@ class Registry(unittest.TestCase):
         self.assertIn("This saved candidate is incomplete; its ending may be damaged.", script)
         self.assertIn("generateScrollTop", script)
         self.assertNotIn('class="musicCompileHead"', script)
-        self.assertIn('class="musicValidationError"', script)
+        self.assertNotIn('Section tags such as <code>[Verse]</code>', html)
+        self.assertNotIn('timelineMagiaRemix', html + script)
+        self.assertIn('id="timelineMagiaCleanup"', html)
+        self.assertIn('id="zoomSlider" class="zoomSlider" min="5"', html)
         self.assertLess(script.index("'/api/music/preview'", script.index('async function generateMusic')),
                         script.index("'/api/scenes'", script.index('async function generateMusic')))
         self.assertNotIn("Add a video clip to the timeline first", script)

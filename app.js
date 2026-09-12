@@ -95,7 +95,7 @@ function applyProjectLayout(){
   if(Number.isFinite(+layout.media_width))document.body.style.setProperty('--media-w',clamp(+layout.media_width,180,420)+'px');
   if(Number.isFinite(+layout.inspector_width))document.body.style.setProperty('--inspector-w',clamp(+layout.inspector_width,280,520)+'px');
   if(Number.isFinite(+layout.timeline_height))document.body.style.setProperty('--timeline-h',clamp(+layout.timeline_height,250,window.innerHeight*.8)+'px');
-  if(Number.isFinite(+layout.timeline_zoom)){pxPerSec=clamp(+layout.timeline_zoom,20,400);syncZoomUi();}
+  if(Number.isFinite(+layout.timeline_zoom)){pxPerSec=clamp(+layout.timeline_zoom,5,400);syncZoomUi();}
   if(Number.isFinite(+layout.lane_header_width)){LANE_OFFSET=clamp(+layout.lane_header_width,96,320);document.body.style.setProperty('--lane-head-w',LANE_OFFSET+'px');}
   if(['clip','transform','color','animate','transitions','effects'].includes(layout.inspector_clip_tab))inspectorClipTab=layout.inspector_clip_tab;
   const footer=$('#timeline');if(footer)footer.classList.toggle('maximized',!!layout.timeline_maximized);const maxBtn=$('#tlMaxBtn');if(maxBtn)maxBtn.classList.toggle('on',!!layout.timeline_maximized);if($('#tlMaxLabel'))$('#tlMaxLabel').textContent=layout.timeline_maximized?'Collapse':'Expand';
@@ -2503,7 +2503,7 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
     try{await api('/api/music/preview',{method:'POST',body:{prompt,params,prompt_skill_id:musicSkillId}});
       if(request!==musicCompileRequest)return;
       box.innerHTML='';musicCompileFingerprint=fingerprint;}
-    catch(error){if(request===musicCompileRequest){box.innerHTML='<div class="musicValidationError">'+esc(error.message)+'</div>';musicCompileFingerprint=fingerprint;}}};
+    catch(error){if(request===musicCompileRequest){box.innerHTML='';musicCompileFingerprint=fingerprint;}}};
   if(musicCompileTimer)clearTimeout(musicCompileTimer);
   if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
 function bindMusicComposer(){syncMusicPlanAvailability();if(musicBound)return;musicBound=true;
@@ -3527,11 +3527,11 @@ function extractFrameAtPlayhead() {
 }
 
 function syncZoomUi() {
-  const s = $('#zoomSlider'); if (s) { s.value = pxPerSec; s.style.setProperty('--zoom-fill', (((pxPerSec - 20) / (400 - 20)) * 100).toFixed(1) + '%'); }
-  const v = $('#zoomVal'); if (v) v.textContent = (pxPerSec / 100).toFixed(1) + '×';
+  const s = $('#zoomSlider'); if (s) { s.value = pxPerSec; s.style.setProperty('--zoom-fill', (((pxPerSec - 5) / (400 - 5)) * 100).toFixed(1) + '%'); }
+  const v = $('#zoomVal'); if (v) { const zoom=pxPerSec/100; v.textContent=(zoom<0.1?zoom.toFixed(2):zoom.toFixed(1))+'×'; }
 }
 function setZoom(px) {
-  pxPerSec = clamp(+px || 100, 20, 400);
+  pxPerSec = clamp(+px || 100, 5, 400);
   syncZoomUi();
   renderTimeline();
   saveProjectLayout();
@@ -3587,9 +3587,16 @@ function renderTimelineMagiaPlan(plan){
 }
 function setTimelineMagiaBusy(busy){
   timelineMagiaPlanning=busy;
-  $('#timelineMagiaRemix').disabled=busy;
+  $('#timelineMagiaCleanup').disabled=busy;
   $('#timelineMagiaApply').disabled=false;
   renderTimelineMagiaPlan(timelineMagiaPlan);
+}
+async function cleanUpTimeline(){
+  const button=$('#timelineMagiaCleanup'),label=button.textContent;button.disabled=true;button.textContent='Cleaning…';
+  try{const result=await api('/api/timeline/cleanup',{method:'POST'});await refresh(true);renderTimelineMagiaApplied();scheduleTimelineMagiaPlan();
+    const parts=[];if(result.shifted_by>0)parts.push('moved the edit '+result.shifted_by.toFixed(2)+'s to 0:00');if(result.overlaps_repaired)parts.push('repaired '+result.overlaps_repaired+' overlap'+(result.overlaps_repaired===1?'':'s'));
+    toast(parts.length?'Timeline cleaned up · '+parts.join(' and '):'Timeline is already clean','ok');
+  }catch(error){toast(error.message,'err');}finally{button.textContent=label;button.disabled=false;}
 }
 async function requestTimelineMagiaPlan(remix=false,useAI=false){
   if(remix||!timelineMagiaSeed)timelineMagiaSeed=(Date.now()+Math.floor(Math.random()*100000))%2147483647;
@@ -4129,7 +4136,7 @@ function bindEvents() {
   $('#splitBtn').addEventListener('click', splitAtPlayhead);
   $('#timelineMagiaBtn').addEventListener('click',openTimelineMagia);
   $('#timelineMagiaClose').addEventListener('click',closeTimelineMagia);$('#timelineMagiaCancel').addEventListener('click',closeTimelineMagia);$('#timelineMagiaScrim').addEventListener('click',closeTimelineMagia);
-  $('#timelineMagiaRemix').addEventListener('click',()=>requestTimelineMagiaPlan(true,true));$('#timelineMagiaApply').addEventListener('click',applyTimelineMagia);
+  $('#timelineMagiaCleanup').addEventListener('click',cleanUpTimeline);$('#timelineMagiaApply').addEventListener('click',applyTimelineMagia);
   $('#timelineMagiaScope').addEventListener('change',scheduleTimelineMagiaPlan);$('#timelineMagiaDirection').addEventListener('input',scheduleTimelineMagiaPlan);
   $('#timelineMagiaExampleToggle').addEventListener('click',()=>{const panel=$('#timelineMagiaExamples');panel.hidden=!panel.hidden;$('#timelineMagiaExampleToggle').textContent=panel.hidden?'View recipe notes':'Hide recipe notes';});
   $$('[data-magia-recipe]').forEach(button=>button.addEventListener('click',()=>selectTimelineMagiaRecipe(button.dataset.magiaRecipe)));

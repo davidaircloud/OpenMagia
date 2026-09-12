@@ -601,6 +601,18 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertEqual([c["start"] for c in project["tracks"][0]["clips"]], [0, 5.2, 8.8])
         self.assertFalse(server.repair_timeline_overlaps(project))
 
+    def test_cleanup_timeline_repairs_overlaps_and_moves_edit_to_zero(self):
+        project = {"tracks": [
+            {"clips": [{"id": "first", "start": 4, "in": 0, "out": 5},
+                       {"id": "second", "start": 6, "in": 0, "out": 2}]},
+            {"clips": [{"id": "audio", "start": 5, "in": 0, "out": 1}]},
+        ]}
+        result = server.cleanup_timeline(project)
+        self.assertEqual([clip["start"] for clip in project["tracks"][0]["clips"]], [0, 5])
+        self.assertEqual(project["tracks"][1]["clips"][0]["start"], 1)
+        self.assertEqual(result["shifted_by"], 4)
+        self.assertEqual(result["overlaps_repaired"], 1)
+
     def test_scene_can_explicitly_ignore_saved_project_style(self):
         project = {"base_prompt": "LEGACY_STYLE_SHOULD_NOT_LEAK", "characters": [], "media": []}
         scene = {"prompt": "a red kite over an empty beach", "character_ids": [],
