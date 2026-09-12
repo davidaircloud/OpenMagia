@@ -1276,6 +1276,31 @@ def terminate_process_tree(proc, timeout=5):
                 pass
     return True
 
+def model_update_fingerprint(component):
+    """Small source/checkpoint identity used to report update outcomes honestly."""
+    paths = []
+    if component == "formatter":
+        paths = [ROOT / "addons" / "llama.cpp" / ".git" / "HEAD",
+                 DEFAULT_FORMATTER_MODEL, DEFAULT_FORMATTER_MODEL.with_name("qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf")]
+    elif component == "yue":
+        paths = [YUE_LOCAL_DIR / "YuE" / ".git" / "HEAD", YUE_LOCAL_DIR / "YuE" / "pyproject.toml"]
+        hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        paths += [hub / "models--m-a-p--YuE2-3B" / "refs" / "main",
+                  hub / "models--m-a-p--YuE2-Vae" / "refs" / "main"]
+    elif component == "h3":
+        paths = [ROOT / "h3.c" / ".git" / "HEAD", Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json",
+                 Path(H3_MODEL) / "Ref2VA" / "transformer" / "config.json"]
+    identity = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            identity.append((str(path), stat.st_size, stat.st_mtime_ns,
+                             path.read_text(errors="replace")[:160] if stat.st_size < 4096 else ""))
+        except OSError:
+            identity.append((str(path), None))
+    return identity
+
+
 def install_model_component(component, update=False):
     """Run an immutable snapshot of the idempotent installer in the background."""
     model_installs[component] = {"status": "running", "message": "Preparing download…"}
@@ -1290,6 +1315,7 @@ def install_model_component(component, update=False):
     if update:
         flags.append("--update-sources")
     snapshot = None
+    before_update = model_update_fingerprint(component) if update else None
     try:
         # Bash may read a long-running script incrementally. Running a private
         # snapshot prevents an app update from changing offsets underneath an
@@ -1341,7 +1367,12 @@ def install_model_component(component, update=False):
         reader.join(timeout=2)
         lines = output[-8:]
         tail = "\n".join(re.sub(r"\x1b\[[0-9;]*m", "", line) for line in lines)
-        model_installs[component] = {"status": "ready" if returncode == 0 else "error", "message": tail or "Installation finished"}
+        if returncode == 0 and update:
+            changed = model_update_fingerprint(component) != before_update
+            model_installs[component] = {"status":"updated" if changed else "current",
+                                         "message":"Update installed." if changed else "Already on the latest available version."}
+        else:
+            model_installs[component] = {"status": "ready" if returncode == 0 else "error", "message": tail or "Installation finished"}
     except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
         model_installs[component] = {"status": "error", "message": str(exc)}
     finally:

@@ -62,7 +62,8 @@ class ModelInstallerTests(unittest.TestCase):
             return self.process("checking Qwen files\n")
         with mock.patch.object(server.subprocess, "Popen", side_effect=completed):
             server.install_model_component("formatter", update=True)
-        self.assertEqual(server.model_installs["formatter"]["status"], "ready")
+        self.assertEqual(server.model_installs["formatter"]["status"], "current")
+        self.assertIn("latest", server.model_installs["formatter"]["message"])
 
     def test_split_formatter_requires_every_shard(self):
         with tempfile.TemporaryDirectory() as folder:

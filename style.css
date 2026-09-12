@@ -997,6 +997,7 @@ footer.maximized{left:82px}
 #musicGenerationControls .h3Composer{border-color:#3a3a40;box-shadow:0 8px 28px rgba(0,0,0,.2)}
 .modelManagerPane{padding-top:16px}
 .modelManagerPane[data-model-pane=addons] .modelInstallOptions{margin:0;border-top:0}
+.managedModelActions{display:flex;align-items:center;justify-content:flex-end;gap:7px}.managedModelActions .btn{width:auto;min-width:0;min-height:31px;padding:0 10px;white-space:nowrap}.managedModelActions .danger{padding-inline:9px}@media(max-width:760px){.managedModelActions{grid-column:1/-1;justify-self:end}}
 .modelManagerPane[data-model-pane=addons] .loraHead{min-height:44px;margin:0;padding:11px 0;border-bottom:1px solid #27272a}
 #musicGenerationControls,#musicGenerationControls>*{min-width:0;max-width:100%;box-sizing:border-box}
 #musicGenerationControls .fld{min-width:0;box-sizing:border-box}
