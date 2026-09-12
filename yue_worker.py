@@ -298,6 +298,12 @@ class Worker:
                 song.result["sample_rate"] = data.get("sample_rate")
                 song.result["identity"] = data.get("identity")
                 song.result["plan"] = data
+            if song.result.get("truncated"):
+                song.status = "error"
+                song.error = ("YuE stopped before completing this candidate, so the partial ending was discarded. "
+                              "Retry to generate a complete variation.")
+                self.note(f"rejected {song.id}: truncated output")
+                return
             quality = analyze_audio_quality(audio)
             song.result["quality"] = quality
             if not quality.get("accepted", True):

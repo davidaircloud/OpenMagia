@@ -1457,6 +1457,15 @@ def repair_generation_media_integrity(project):
         if item.get("scene_id"):
             by_scene.setdefault(item["scene_id"], []).append(item)
     for scene_id, items in by_scene.items():
+        scene = next((candidate for candidate in project.get("scenes", [])
+                      if candidate.get("id") == scene_id), None)
+        if scene and scene.get("status") in ("queued", "running", "error"):
+            for item in items:
+                if item.get("status") != "ready" and item.get("status") != scene.get("status"):
+                    item["status"] = scene["status"]
+                    if scene.get("error"):
+                        item["error"] = scene["error"]
+                    changed = True
         ready = next((item for item in items if item.get("status") == "ready" and item.get("src")), None)
         if not ready:
             continue
@@ -3931,6 +3940,13 @@ def apply_timeline_magia_plan(project, plan):
             if key in allowed:
                 clip[key] = value
         applied += 1
+    if scope == "timeline":
+        all_clips = [clip for track in project.get("tracks", []) for clip in track.get("clips", [])]
+        if all_clips:
+            earliest = min(max(0.0, float(clip.get("start", 0))) for clip in all_clips)
+            if earliest > 1e-6:
+                for clip in all_clips:
+                    clip["start"] = round(max(0.0, float(clip.get("start", 0)) - earliest), 6)
     repair_timeline_overlaps(project)
     project["timelineMagia"] = {
         "recipe_id": plan.get("recipe_id") or "",
@@ -4112,8 +4128,11 @@ def run_music_job(scene_id, project):
         with lock:
             latest = load_project_slug(project["slug"])
             failed = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
+            pending = next((x for x in latest.get("media", []) if x.get("scene_id") == scene_id), None)
             if failed:
                 failed["status"] = "error"; failed["error"] = str(exc)
+            if pending:
+                pending["status"] = "error"; pending["error"] = str(exc)
             save_project(latest)
         progress.pop(scene_id, None)
         return

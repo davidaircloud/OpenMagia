@@ -1091,6 +1091,21 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertEqual(project["timelineMagia"]["profile"], "Social energy")
         self.assertEqual(project["timelineMagia"]["direction"], "")
 
+    def test_timeline_magia_moves_the_whole_edit_to_zero(self):
+        project = self._timeline_magia_project()
+        for track in project["tracks"]:
+            for clip in track["clips"]:
+                clip["start"] += 12
+        project["tracks"].append({"id": "A1", "kind": "audio", "clips": [
+            {"id": "a1", "mediaId": "audio", "start": 14, "in": 0, "out": 4}
+        ]})
+        plan = server.timeline_magia_plan(project, {"seed": 42, "recipe_id": "subtle"})
+        server.apply_timeline_magia_plan(project, plan)
+        starts = [clip["start"] for track in project["tracks"] for clip in track["clips"]]
+        self.assertEqual(min(starts), 0)
+        audio = project["tracks"][-1]["clips"][0]
+        self.assertEqual(audio["start"], 2)
+
     def test_timeline_magia_sepia_direction_is_visible_and_controlled(self):
         project = self._timeline_magia_project()
         plan = server.timeline_magia_plan(project, {"seed": 8, "direction": "make the video sepia",

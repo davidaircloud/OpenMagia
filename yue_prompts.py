@@ -245,6 +245,25 @@ def looks_like_abc(value):
     return bool(re.search(r"(?m)^\s*(?:V:|M:|Q:|K:)", text))
 
 
+def bounded_instrumental_score(style, seed=42):
+    """Give lyric-free YuE requests a short score boundary instead of an open stream."""
+    tempo_match = re.search(r"\b(\d{2,3})\s*BPM\b", str(style or ""), re.I)
+    tempo = max(60, min(180, int(tempo_match.group(1)))) if tempo_match else 108
+    minor = bool(re.search(r"\b(?:minor|moody|dark|cinematic)\b", str(style or ""), re.I))
+    progressions = [
+        ['"Am"A2c2e2a2', '"F"F2A2c2f2', '"C"G2c2e2g2', '"G"G2B2d2g2'],
+        ['"C"C2E2G2c2', '"Am"A2c2e2a2', '"F"F2A2c2f2', '"G"G2B2d2g2'],
+    ]
+    try:
+        chosen = progressions[int(seed) % len(progressions)]
+    except (TypeError, ValueError):
+        chosen = progressions[0]
+    if minor:
+        chosen = progressions[0]
+    bars = " | ".join(chosen * 4) + " |]"
+    return f"X:1\nT:Instrumental plan\nM:4/4\nL:1/8\nQ:1/4={tempo}\nK:{'Am' if minor else 'C'}\n{bars}"
+
+
 def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", abc="",
                          seed=42, guidance=None, skill_direction="", instrumental=False,
                          song_id="", skill_id=""):
@@ -292,6 +311,9 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         seed_value = int(seed)
     except (TypeError, ValueError):
         seed_value = 42
+    generated_score = bool(instrumental and mode in {"full", "melody"} and not score)
+    if generated_score:
+        score = bounded_instrumental_score(idea_text, seed_value)
     request = {
         "id": sanitize_id(song_id or idea or "song"),
         "style": style,
@@ -329,6 +351,7 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
             "instrumental": bool(instrumental),
             "lyric_lines_removed": lyric_report,
             "score_conditioned": bool(score),
+            "score_generated": generated_score,
             "skill_id": skill_id or "",
             "signature": signature,
         },

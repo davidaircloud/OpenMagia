@@ -3609,8 +3609,6 @@ function scheduleTimelineMagiaPlan(){
   timelineMagiaTimer=setTimeout(()=>requestTimelineMagiaPlan(false),180);
 }
 function openTimelineMagia(){
-  const hasVideo=(state.tracks||[]).some(track=>track.kind==='video'&&(track.clips||[]).length);
-  if(!hasVideo)return toast('Add a video clip to the timeline first','err');
   const selected=timelineMagiaSelectedClip();
   const selectedOption=$('#timelineMagiaScope option[value="selected"]');
   selectedOption.textContent=selected?'Selected clip · '+((mediaById(selected.mediaId)||{}).name||selected.id)+' on '+trackOfClip(selected).name:'Selected clip';

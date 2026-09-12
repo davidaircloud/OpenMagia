@@ -62,6 +62,16 @@ class RequestCompiler(unittest.TestCase):
         self.assertIn("instrumental arrangement", compiled["request"]["style"])
         kinds = {warning["kind"] for warning in compiled["audit"]["warnings"]}
         self.assertIn("duration", kinds)
+        self.assertTrue(compiled["audit"]["score_generated"])
+        self.assertIn("abc", compiled["request"])
+        self.assertIn("Q:1/4=", compiled["request"]["abc"])
+
+    def test_artist_score_is_preserved_instead_of_replaced(self):
+        score = "X:1\nM:4/4\nK:Dm\nD2 F2 A4 |]"
+        compiled = yue.format_music_request(idea="dark strings", instrumental=True,
+                                            plan_mode="full", abc=score)
+        self.assertEqual(compiled["request"]["abc"], score)
+        self.assertFalse(compiled["audit"]["score_generated"])
 
     def test_instrumental_preserves_the_selected_symbolic_plan(self):
         compiled = yue.format_music_request(idea="solo cello", instrumental=True, plan_mode="melody")
@@ -210,6 +220,9 @@ class Registry(unittest.TestCase):
         self.assertIn('class="musicValidationError"', script)
         self.assertLess(script.index("'/api/music/preview'", script.index('async function generateMusic')),
                         script.index("'/api/scenes'", script.index('async function generateMusic')))
+        self.assertNotIn("Add a video clip to the timeline first", script)
+        css = (root / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".mtile.sel{border-color:#8b5cf6", css)
 
 
 class Skills(unittest.TestCase):
