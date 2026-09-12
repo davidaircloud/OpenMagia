@@ -775,6 +775,35 @@ def compiled_skill_direction(skill_id):
     compiled = compile_skill_contract(skill_id)
     return compiled["refinement_direction"] if compiled else ""
 
+
+def normalize_music_brief_text(value):
+    """Remove pasted table marks and exact repeated sentences from a music brief."""
+    text = re.sub(r"\s*[│┃]\s*", " ", str(value or ""))
+    text = yue_prompts.clean_text(text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept, seen = [], set()
+    for sentence in sentences:
+        sentence = sentence.strip()
+        key = re.sub(r"\W+", " ", sentence).strip().casefold()
+        if sentence and key not in seen:
+            kept.append(sentence)
+            seen.add(key)
+    return " ".join(kept)
+
+
+def music_vocal_intent(idea):
+    """Read explicit vocal wording, giving a requested vocal priority over 'instrumental'."""
+    text = str(idea or "")
+    negative_pattern = r"\b(?:no (?:lead )?vocals?|without vocals?|no singing|instrumental only|vocal timbre\s*:\s*none|vocals?\s*:\s*none)\b"
+    negative = bool(re.search(negative_pattern, text, re.I))
+    positive_text = re.sub(negative_pattern, "", text, flags=re.I)
+    positive = bool(re.search(r"\b(?:some |with |warm |soft |male |female )?(?:lead )?vocals?\b|\b(?:sung|singing|vocalist)\b", positive_text, re.I))
+    if positive:
+        return "vocal"
+    if negative or re.search(r"\binstrumental\b", text, re.I):
+        return "instrumental"
+    return "unspecified"
+
 def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     """Use the configured refinement model as an editor before YuE sees a request.
 
@@ -783,9 +812,9 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     [Instrumental] section: never let the refiner draft sung words when the
     artist asked for instrumental, and never move the brief into the lyrics.
     """
-    idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
-    instrumental = bool(instrumental) or (not lyrics and bool(re.search(
-        r"\b(?:instrumental|no (?:lead )?vocals?|without vocals?|no singing)\b", idea, re.I)))
+    idea, lyrics = normalize_music_brief_text(idea), str(lyrics or "").strip()
+    vocal_intent = music_vocal_intent(idea)
+    instrumental = vocal_intent == "instrumental" or (vocal_intent == "unspecified" and bool(instrumental))
     plan_mode = "off" if instrumental else "full"
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
@@ -800,26 +829,21 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     if not formatter_available():
         return {"style": fallback_style, "lyrics": lyrics, "instrumental": instrumental,
                 "plan_mode": plan_mode, "used_ai": False}
-    lyric_rule = (
-        "This is an instrumental track: return lyrics as exactly [Instrumental] and do not write any sung words. "
-        "Write the style as an instrumental arrangement with no lead vocal and no sung words. "
-        if instrumental else
-        "If lyrics are supplied, preserve every word and line in the same order; you may only add bracketed section labels. "
-        "If lyrics are empty, draft concise singable sectioned lyrics only when the brief asks for a song with vocals; for instrumental work return [Instrumental]. "
-    )
+    vocal_rule = ("NO VOCALS: write an instrumental arrangement and set instrumental true. " if instrumental else
+                  "VOCALS REQUIRED: retain the requested lead vocal and set instrumental false. ")
     instruction = (
-        "Act as a music editor preparing a YuE 2 request. Return JSON only with keys style, lyrics, instrumental, and plan_mode. "
-        "Style must preserve every concrete word of the artist's brief and may add audible arrangement detail; never replace it with a shorter category list. "
-        "Keep the named instruments, playing character, rhythm, texture, dynamics, production, emotional arc, and intended use. "
-        + lyric_rule +
-        "Never promise duration, stems, voice cloning, reference-audio imitation, or an artist match.\n"
-        f"SKILL:\n{direction}\nBRIEF:\n{idea}\nLYRICS:\n{lyrics}")
-    cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "1200", "--temp", "0.2",
+        "You are a music producer. Return JSON only with keys style, instrumental, and plan_mode. "
+        + vocal_rule +
+        "Rewrite BRIEF into one richer production brief. Preserve every named instrument, rhythm, texture, mood, tempo, and use. "
+        "Add compatible section development, instrument roles, dynamics, stereo space, and vocal placement. Do not repeat sentences or output category labels. "
+        "Set plan_mode to full for vocals and off for instrumental music without a supplied score.\n"
+        f"SKILL: {direction}\nBRIEF: {idea}")
+    cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "700", "--temp", "0.3",
            "--seed", "0", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
     try:
         run = run_formatter_command(cmd, timeout=90)
         data = _last_json_object(re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", run.stdout))
-        style, refined_lyrics = str(data.get("style") or "").strip(), str(data.get("lyrics") or "").strip()
+        style, refined_lyrics = str(data.get("style") or "").strip(), lyrics
         if instrumental:
             # Vocals are never allowed to sneak back in for an instrumental brief,
             # and a collapsed one-word style (e.g. just "Instrumental") must never
@@ -832,10 +856,11 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
                     "instrumental": True, "plan_mode": "off", "used_ai": False}
         original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
-        if run.returncode == 0 and style and refined_lyrics and (not lyrics or original_lines == refined_lines):
+        lyrics_preserved = (not lyrics and not refined_lyrics) or (bool(lyrics) and original_lines == refined_lines)
+        if run.returncode == 0 and style and lyrics_preserved:
             return {"style": merge_music_style(idea, style),
                     "lyrics": refined_lyrics[:yue_prompts.MAX_LYRICS_CHARS],
-                    "instrumental": bool(data.get("instrumental", False)),
+                    "instrumental": False if vocal_intent == "vocal" else bool(data.get("instrumental", False)),
                     "plan_mode": str(data.get("plan_mode") or "full") if str(data.get("plan_mode") or "full") in {"full", "melody", "off"} else "full",
                     "used_ai": True}
     except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
@@ -846,16 +871,32 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
 
 def merge_music_style(original, refined):
     """Accept useful additions from the refiner without discarding the artist's brief."""
-    original = yue_prompts.clean_text(original)
-    refined = yue_prompts.clean_text(refined)
+    original = normalize_music_brief_text(original)
+    refined = normalize_music_brief_text(refined)
     if not original:
-        return refined[:yue_prompts.MAX_STYLE_CHARS]
+        return trim_music_style(refined)
     if not refined or refined.lower() == original.lower():
-        return original[:yue_prompts.MAX_STYLE_CHARS]
+        return trim_music_style(original)
     if original.lower() in refined.lower():
-        return refined[:yue_prompts.MAX_STYLE_CHARS]
-    combined = original.rstrip(". ") + ". " + refined
-    return combined[:yue_prompts.MAX_STYLE_CHARS]
+        return trim_music_style(refined)
+    # A refinement must retain the distinctive vocabulary. Falling back to the
+    # cleaned original is safer than appending a generic paraphrase or duplicate.
+    words = {word for word in re.findall(r"[a-z0-9]+", original.lower()) if len(word) > 3}
+    refined_words = set(re.findall(r"[a-z0-9]+", refined.lower()))
+    coverage = len(words & refined_words) / max(1, len(words))
+    return trim_music_style(refined if coverage >= .72 else original)
+
+
+def trim_music_style(value):
+    """Fit YuE's style limit without leaving a visibly broken final sentence."""
+    text = str(value or "").strip()
+    limit = yue_prompts.MAX_STYLE_CHARS
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    endings = [head.rfind(mark) for mark in (".", "!", "?")]
+    boundary = max(endings)
+    return head[:boundary + 1] if boundary >= int(limit * .55) else head.rstrip(" ,;:-")
 
 
 def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):

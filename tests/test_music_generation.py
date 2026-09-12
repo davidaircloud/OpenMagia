@@ -270,9 +270,33 @@ class Skills(unittest.TestCase):
         with mock.patch.object(server, "formatter_available", return_value=True), \
              mock.patch.object(server, "run_formatter_command", return_value=generic):
             result = server.refine_music_brief(original, instrumental=True)
-        self.assertIn(original, result["style"])
-        self.assertIn("electronic", result["style"])
+        self.assertEqual(original, result["style"])
         self.assertEqual(result["plan_mode"], "off")
+
+    def test_long_music_refinement_ends_at_a_complete_sentence(self):
+        text = ("Detailed arrangement with piano, bass, drums, texture, and dynamics. " * 30).strip()
+        trimmed = server.trim_music_style(text)
+        self.assertLessEqual(len(trimmed), yue.MAX_STYLE_CHARS)
+        self.assertTrue(trimmed.endswith("."))
+
+    def test_explicit_lead_vocal_wins_and_repeated_prompt_is_cleaned(self):
+        repeated = ("Warm lo-fi chillhop with house notes. Mellow Rhodes, dusty drums, │ soft bass. "
+                    "Instrumental, some lead vocals. Warm lo-fi chillhop with house notes. "
+                    "Mellow Rhodes, dusty drums, soft bass.")
+        refined = SimpleNamespace(returncode=0, stderr="", stdout=(
+            '{"style":"Warm lo-fi chillhop with house notes, mellow Rhodes, dusty drums, soft bass, sparse lead vocals",'
+            '"instrumental":true,"plan_mode":"full"}'))
+        with mock.patch.object(server, "formatter_available", return_value=True), \
+             mock.patch.object(server, "run_formatter_command", return_value=refined) as formatter:
+            result = server.refine_music_brief(repeated, instrumental=True)
+        self.assertFalse(result["instrumental"])
+        self.assertEqual(result["plan_mode"], "full")
+        self.assertNotIn("│", result["style"])
+        self.assertEqual(result["style"].lower().count("house notes"), 1)
+        prompt = formatter.call_args.args[0]
+        instruction = prompt[prompt.index("-p") + 1]
+        self.assertIn("VOCALS REQUIRED", instruction)
+        self.assertNotIn("LYRICS:", instruction)
 
     def test_lyric_editor_drafts_and_revises_for_review(self):
         drafted = SimpleNamespace(returncode=0, stderr="", stdout='{"lyrics":"[Verse]\\nRoad home\\n[Chorus]\\nCarry me"}')
