@@ -62,9 +62,9 @@ class RequestCompiler(unittest.TestCase):
         self.assertIn("instrumental arrangement", compiled["request"]["style"])
         kinds = {warning["kind"] for warning in compiled["audit"]["warnings"]}
         self.assertIn("duration", kinds)
-        self.assertTrue(compiled["audit"]["score_generated"])
-        self.assertIn("abc", compiled["request"])
-        self.assertIn("Q:1/4=", compiled["request"]["abc"])
+        self.assertFalse(compiled["audit"]["score_generated"])
+        self.assertNotIn("abc", compiled["request"])
+        self.assertEqual(compiled["request"]["cot"], "off")
 
     def test_artist_score_is_preserved_instead_of_replaced(self):
         score = "X:1\nM:4/4\nK:Dm\nD2 F2 A4 |]"
@@ -74,13 +74,16 @@ class RequestCompiler(unittest.TestCase):
         self.assertFalse(compiled["audit"]["score_generated"])
 
     def test_instrumental_preserves_the_selected_symbolic_plan(self):
-        compiled = yue.format_music_request(idea="solo cello", instrumental=True, plan_mode="melody")
+        score = "X:1\nM:4/4\nK:Dm\nD2 F2 A4 |]"
+        compiled = yue.format_music_request(idea="solo cello", instrumental=True, plan_mode="melody", abc=score)
         self.assertEqual(compiled["request"]["cot"], "melody")
         self.assertEqual(compiled["audit"]["plan_mode_requested"], "melody")
 
-    def test_direct_instrumental_is_rejected_before_a_scene_is_created(self):
-        with self.assertRaisesRegex(ValueError, "needs Full plan"):
-            yue.format_music_request(idea="ambient synth", instrumental=True, plan_mode="off")
+    def test_direct_instrumental_keeps_style_instead_of_fabricating_a_score(self):
+        compiled = yue.format_music_request(idea="ambient synth with bowed bass", instrumental=True, plan_mode="off")
+        self.assertEqual(compiled["request"]["cot"], "off")
+        self.assertIn("bowed bass", compiled["request"]["style"])
+        self.assertNotIn("abc", compiled["request"])
 
     def test_sung_words_beat_an_instrumental_switch(self):
         compiled = yue.format_music_request(idea="anthem", lyrics="[Verse]\nwords remain", instrumental=True)
@@ -256,8 +259,20 @@ class Skills(unittest.TestCase):
         with mock.patch.object(server, "formatter_available", return_value=False):
             result = server.refine_music_brief("Lo-fi piano, instrumental, no lead vocal")
         self.assertTrue(result["instrumental"])
-        self.assertEqual("full", result["plan_mode"])
+        self.assertEqual("off", result["plan_mode"])
         self.assertEqual("[Instrumental]", result["lyrics"])
+
+    def test_music_refiner_cannot_replace_a_rich_brief_with_generic_tags(self):
+        original = "Warm Rhodes, dusty drums, upright bass, tape hiss, with a rising brass finale"
+        generic = SimpleNamespace(returncode=0, stderr="", stdout=(
+            '{"style":"genre: electronic, ensemble: instrumental, emotional arc: uplifting",'
+            '"lyrics":"[Instrumental]","instrumental":true,"plan_mode":"full"}'))
+        with mock.patch.object(server, "formatter_available", return_value=True), \
+             mock.patch.object(server, "run_formatter_command", return_value=generic):
+            result = server.refine_music_brief(original, instrumental=True)
+        self.assertIn(original, result["style"])
+        self.assertIn("electronic", result["style"])
+        self.assertEqual(result["plan_mode"], "off")
 
     def test_lyric_editor_drafts_and_revises_for_review(self):
         drafted = SimpleNamespace(returncode=0, stderr="", stdout='{"lyrics":"[Verse]\\nRoad home\\n[Chorus]\\nCarry me"}')

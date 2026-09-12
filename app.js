@@ -2468,15 +2468,15 @@ let musicSkillId='',musicCompileTimer=null,musicCompileFingerprint='',musicCompi
 function musicRuntime(){return (engine&&engine.music)||null;}
 function musicReady(){const runtime=musicRuntime();return !!(runtime&&runtime.ready);}
 function syncMusicPlanAvailability(){const plan=$('#musicPlan'),vocal=$('#musicVocal');if(!plan||!vocal)return;
-  const direct=plan.querySelector('option[value="off"]'),instrumental=vocal.value==='instrumental';
-  if(direct)direct.disabled=instrumental;if(instrumental&&plan.value==='off')plan.value='full';}
+  const instrumental=vocal.value==='instrumental',hasScore=!!(($('#musicAbc')||{}).value||'').trim();
+  if(instrumental&&!hasScore)plan.value='off';else if(instrumental&&hasScore&&plan.value==='off')plan.value='full';}
 function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal');
   return {plan_mode:plan?plan.value:'full',lyrics:$('#musicLyrics')?$('#musicLyrics').value:'',
     abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
     seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
 function resetMusicComposer(){if($('#musicPrompt'))$('#musicPrompt').value='';if($('#musicLyrics'))$('#musicLyrics').value='';
   if($('#musicAbc'))$('#musicAbc').value='';if($('#musicPlan'))$('#musicPlan').value='full';if($('#musicVocal'))$('#musicVocal').value='lead';
-  if($('#musicSeed'))$('#musicSeed').value='4242';musicSkillId='';musicCompileFingerprint='';musicCompileRequest++;
+  if($('#musicSeed'))$('#musicSeed').value=Math.floor(Math.random()*1e9);musicSkillId='';musicCompileFingerprint='';musicCompileRequest++;
   if(musicCompileTimer)clearTimeout(musicCompileTimer);if($('#musicCompile'))$('#musicCompile').innerHTML='';
   if($('#musicLyricsRefineBtn'))$('#musicLyricsRefineBtn').textContent='✦ Write with model';renderMusicSkills();syncMusicPlanAvailability();}
 function closeMusicLyricsSheet(){const sheet=$('#musicLyricsSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
@@ -2507,7 +2507,7 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
   if(musicCompileTimer)clearTimeout(musicCompileTimer);
   if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
 function bindMusicComposer(){syncMusicPlanAvailability();if(musicBound)return;musicBound=true;
-  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal')syncMusicPlanAvailability();compileMusicPreview(false);});});
+  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal'||sel==='#musicAbc')syncMusicPlanAvailability();compileMusicPreview(false);});});
   const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
   const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
   // reply like "Instrumental" must never overwrite the artist's full description.

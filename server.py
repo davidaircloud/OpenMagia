@@ -786,7 +786,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     idea, lyrics = str(idea or "").strip(), str(lyrics or "").strip()
     instrumental = bool(instrumental) or (not lyrics and bool(re.search(
         r"\b(?:instrumental|no (?:lead )?vocals?|without vocals?|no singing)\b", idea, re.I)))
-    plan_mode = "full"
+    plan_mode = "off" if instrumental else "full"
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
     if instrumental:
@@ -809,7 +809,8 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
     )
     instruction = (
         "Act as a music editor preparing a YuE 2 request. Return JSON only with keys style, lyrics, instrumental, and plan_mode. "
-        "Style must be concise audible direction: language, genre, tempo or feel, ensemble, vocal timbre, production, and emotional arc. "
+        "Style must preserve every concrete word of the artist's brief and may add audible arrangement detail; never replace it with a shorter category list. "
+        "Keep the named instruments, playing character, rhythm, texture, dynamics, production, emotional arc, and intended use. "
         + lyric_rule +
         "Never promise duration, stems, voice cloning, reference-audio imitation, or an artist match.\n"
         f"SKILL:\n{direction}\nBRIEF:\n{idea}\nLYRICS:\n{lyrics}")
@@ -823,16 +824,16 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
             # Vocals are never allowed to sneak back in for an instrumental brief,
             # and a collapsed one-word style (e.g. just "Instrumental") must never
             # replace the artist's full description: fall back to the rich brief.
-            if run.returncode == 0 and style and len(style.strip()) >= 40:
-                return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
+            if run.returncode == 0 and style:
+                return {"style": merge_music_style(idea, style),
                         "lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "instrumental": True,
-                        "plan_mode": "full", "used_ai": True}
+                        "plan_mode": "off", "used_ai": True}
             return {"style": fallback_style, "lyrics": yue_prompts.INSTRUMENTAL_LYRICS,
-                    "instrumental": True, "plan_mode": "full", "used_ai": False}
+                    "instrumental": True, "plan_mode": "off", "used_ai": False}
         original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         if run.returncode == 0 and style and refined_lyrics and (not lyrics or original_lines == refined_lines):
-            return {"style": style[:yue_prompts.MAX_STYLE_CHARS],
+            return {"style": merge_music_style(idea, style),
                     "lyrics": refined_lyrics[:yue_prompts.MAX_LYRICS_CHARS],
                     "instrumental": bool(data.get("instrumental", False)),
                     "plan_mode": str(data.get("plan_mode") or "full") if str(data.get("plan_mode") or "full") in {"full", "melody", "off"} else "full",
@@ -841,6 +842,20 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False):
         pass
     return {"style": fallback_style, "lyrics": lyrics, "instrumental": instrumental,
             "plan_mode": plan_mode, "used_ai": False}
+
+
+def merge_music_style(original, refined):
+    """Accept useful additions from the refiner without discarding the artist's brief."""
+    original = yue_prompts.clean_text(original)
+    refined = yue_prompts.clean_text(refined)
+    if not original:
+        return refined[:yue_prompts.MAX_STYLE_CHARS]
+    if not refined or refined.lower() == original.lower():
+        return original[:yue_prompts.MAX_STYLE_CHARS]
+    if original.lower() in refined.lower():
+        return refined[:yue_prompts.MAX_STYLE_CHARS]
+    combined = original.rstrip(". ") + ". " + refined
+    return combined[:yue_prompts.MAX_STYLE_CHARS]
 
 
 def refine_music_lyrics(idea, lyrics="", skill_id="", instrumental=False):
