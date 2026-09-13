@@ -3973,7 +3973,12 @@ function kickAutoplay(root){
 function skillPreviewMarkup(skill,variant='card'){
   if(skill.custom)return variant==='detail'?'<div class="skillStylePreview customSkillArt">✦</div>':'✦';
   if(skill.type==='music')return variant==='detail'?'<div class="skillStylePreview musicSkillArt"><span>'+esc(skill.icon||'♫')+'</span><small>Music direction for YuE 2</small></div>':'<span class="musicSkillGlyph">'+esc(skill.icon||'♫')+'</span>';
-  const id=esc(skill.id),controls=variant==='detail'?' controls':'';
+  const id=esc(skill.id);
+  if(variant!=='detail')return '<span class="skillPreviewPair '+esc(variant)+'">'+
+    '<img src="/assets/skill-previews/'+id+'.jpg" alt="" loading="lazy">'+
+    '<img src="/assets/skill-previews/'+id+'-reels-2.jpg" alt="" loading="lazy">'+
+  '</span>';
+  const controls=' controls';
   return '<span class="skillPreviewPair '+esc(variant)+'">'+
     '<video src="/assets/skill-previews/'+id+'.mp4" poster="/assets/skill-previews/'+id+'.jpg" muted loop autoplay playsinline'+controls+' preload="metadata"></video>'+
     '<video src="/assets/skill-previews/'+id+'-reels-2.mp4" poster="/assets/skill-previews/'+id+'-reels-2.jpg" muted loop autoplay playsinline'+controls+' preload="metadata"></video>'+
@@ -4032,8 +4037,7 @@ async function openSkillDetail(s, origin='skills-menu') {
   else if(s.custom) specification=s.specification||('# '+s.name+'\n\n'+s.description);
   else try{const contractName=s.type==='music'?'music-production-contract.md':'h3-production-contract.md',contractTitle=s.type==='music'?'Linked music production contract':'Linked H3 production contract';const [response,contract]=await Promise.all([fetch('/skills/openmagia/'+encodeURIComponent(s.id)+'/SKILL.md',{cache:'no-store'}),fetch('/skills/openmagia/references/'+contractName,{cache:'no-store'})]);if(!response.ok||!contract.ok)throw new Error('Skill specification unavailable');specification=(await response.text())+'\n\n---\n\n## '+contractTitle+'\n\n'+(await contract.text());}catch(error){specification='This skill specification could not be loaded. OpenMagia will not substitute a different workflow.\n\n'+error.message;}
   if(request!==skillDetailRequest)return;
-  const provenance=!s.projectStyle&&!s.custom&&s.source_label?'<div class="skillProvenance"><span>Source</span>'+(s.source_url?'<a href="'+esc(s.source_url)+'" target="_blank" rel="noopener">'+esc(s.source_label)+' ↗</a>':'<strong>'+esc(s.source_label)+'</strong>')+'<small>'+esc(s.source_note||'')+'</small></div>':'';
-  body.innerHTML = '<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+provenance+(s.user_prompt?'<div class="skillUseWhen"><span>Use this when</span><p>'+esc(s.user_prompt)+'</p></div>':'')+'<h3>'+(s.projectStyle?'Continuity specification':'Complete skill specification')+'</h3><pre class="skillSpec"></pre></div><div class="skillSheetFoot">'+(s.projectStyle?'<button class="btn ghost danger" id="deleteProjectStyle">Delete</button>':'')+'<button class="btn primary" id="useSkillBtn">'+(s.projectStyle?'Use project style':'Use Skill')+'</button></div>';
+  body.innerHTML = '<div class="skillDetailScroll">'+detailPreview+(s.projectStyle?'<span class="scopeLabel">PROJECT STYLE · '+esc(owner)+'</span>':'')+'<p class="skillDetailDescription"></p>'+context+(s.user_prompt?'<div class="skillUseWhen"><span>Use this when</span><p>'+esc(s.user_prompt)+'</p></div>':'')+'<h3>'+(s.projectStyle?'Continuity specification':'Complete skill specification')+'</h3><pre class="skillSpec"></pre></div><div class="skillSheetFoot">'+(s.projectStyle?'<button class="btn ghost danger" id="deleteProjectStyle">Delete</button>':'')+'<button class="btn primary" id="useSkillBtn">'+(s.projectStyle?'Use project style':'Use Skill')+'</button></div>';
   body.querySelector('.skillDetailDescription').textContent=s.description;body.querySelector('.skillSpec').textContent=specification;bindSkillPreviewFallback(body);kickAutoplay(body);
   body.querySelector('#useSkillBtn').addEventListener('click', async() => {
     if(s.projectStyle){const profile={name:s.name,prompt:s.prompt,skill_id:s.id,source:'continuity'};await api('/api/project',{method:'POST',body:{style_profile:profile,style_enabled:true}});state.style_profile=profile;state.style_enabled=true;state.base_prompt=s.prompt;closeSkillDetail();setHubView('editor');setInspectorTab('generate');renderGenerate();toast(s.name+' applied to new generations','ok');return;}

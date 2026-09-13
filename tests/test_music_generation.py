@@ -240,13 +240,19 @@ class Skills(unittest.TestCase):
                          {"song-director", "score-underscore", "album-identity"})
         for item in music:
             self.assertEqual(item["source_short"], "OpenMagia")
-            self.assertIn("YuE", item["source_label"])
-            self.assertTrue(item["source_url"].startswith("https://github.com/multimodal-art-projection/YuE"))
+            self.assertEqual(item["source_label"], "OpenMagia")
+            self.assertTrue(item["source_url"].startswith("https://github.com/davidaircloud/OpenMagia"))
             self.assertTrue(item["user_prompt"])
             contract = server.compile_skill_contract(item["id"])
             self.assertTrue(contract["refinement_direction"])
             self.assertTrue(contract["music_direction"])
             self.assertFalse(contract["visual_direction"])
+
+    def test_skill_cards_use_static_posters(self):
+        script = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if(variant!=='detail')return", script)
+        self.assertIn("-reels-2.jpg", script)
+        self.assertNotIn("class=\"skillProvenance\"", script)
 
     def test_music_skill_customization_extends_instead_of_replacing_contract(self):
         base = server.compiled_skill_direction("score-underscore")
