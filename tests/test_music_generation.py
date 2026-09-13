@@ -65,6 +65,8 @@ class RequestCompiler(unittest.TestCase):
         self.assertFalse(compiled["audit"]["score_generated"])
         self.assertNotIn("abc", compiled["request"])
         self.assertEqual(compiled["request"]["cot"], "full")
+        self.assertEqual(compiled["audit"]["sections"],
+                         ["Intro", "Instrumental", "Interlude", "Breakdown", "Instrumental", "Outro"])
 
     def test_artist_score_is_preserved_instead_of_replaced(self):
         score = "X:1\nM:4/4\nK:Dm\nD2 F2 A4 |]"
@@ -276,7 +278,7 @@ class Skills(unittest.TestCase):
             result = server.refine_music_brief("Lo-fi piano, instrumental, no lead vocal")
         self.assertTrue(result["instrumental"])
         self.assertEqual("full", result["plan_mode"])
-        self.assertEqual("[Instrumental]", result["lyrics"])
+        self.assertEqual(yue.INSTRUMENTAL_LYRICS, result["lyrics"])
 
     def test_music_refiner_cannot_replace_a_rich_brief_with_generic_tags(self):
         original = "Warm Rhodes, dusty drums, upright bass, tape hiss, with a rising brass finale"

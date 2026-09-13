@@ -56,10 +56,14 @@ SECTION_WORDS = {
     "verse 1", "verse 2", "chorus 1", "chorus 2",
 }
 INSTRUMENTAL_SECTIONS = {"instrumental", "inst", "solo", "interlude", "breakdown"}
-# YuE has no instrumental switch. Keep the lyric shape minimal and let the chosen
-# symbolic plan provide a bounded composition; direct generation has been observed
-# to stream past 6,000 tokens without emitting an end token for ordinary prompts.
-INSTRUMENTAL_LYRICS = "[Instrumental]"
+# YuE has no instrumental switch. A single ``[Instrumental]`` tag gives the
+# planner no form or ending boundary and can run until the semantic context is
+# exhausted. This section-only map contains no words to sing while still asking
+# the symbolic planner for a complete composition with a real outro.
+INSTRUMENTAL_LYRICS = "\n".join((
+    "[Intro]", "[Instrumental]", "[Interlude]", "[Breakdown]",
+    "[Instrumental]", "[Outro]",
+))
 SEMANTIC_TOKENS_PER_SECOND = 23.0        # measured: 1011 semantic tokens -> 43.5 s of audio
 INSTRUMENTAL_STYLE_TAG = "instrumental arrangement, no lead vocal, no sung words"
 

@@ -272,7 +272,14 @@ class Worker:
                     except (OSError, ValueError):
                         detail = ""
                 song.status = "error"
-                song.error = detail or "YuE 2 stopped: " + " | ".join(tail)[-700:]
+                if detail:
+                    song.error = detail
+                elif code < 0:
+                    song.error = (f"YuE 2 was terminated by signal {-code} before the song completed. "
+                                  "Retry with a different seed or a more explicit section structure.")
+                else:
+                    song.error = (f"YuE 2 exited with code {code} before the song completed. "
+                                  "The worker log retains the technical output for diagnosis.")
                 self.note(f"failed {song.id}: {song.error[-160:]}")
                 return
             audio = song.audio_path
