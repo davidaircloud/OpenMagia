@@ -127,6 +127,10 @@ class RequestCompiler(unittest.TestCase):
         collapsed = yue_worker.classify_audio_quality(
             [0.07, 0.08, 0.16, 0.18, 0.25, 0.61, 0.53], 1.0, 0.32, 0.003)
         self.assertFalse(collapsed["accepted"])
+        collapsed_ending = yue_worker.classify_audio_quality(
+            [0.04, 0.08, 0.06, 0.05, 0.002, 0.0003], 0.91, 0.05, 0)
+        self.assertFalse(collapsed_ending["accepted"])
+        self.assertIn("near silence", collapsed_ending["reason"])
         healthy = yue_worker.classify_audio_quality(
             [0.08, 0.1, 0.16, 0.22, 0.3], 0.97, 0.18, 0.0001)
         self.assertTrue(healthy["accepted"])

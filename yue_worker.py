@@ -63,6 +63,14 @@ def classify_audio_quality(window_rms, peak, rms, clipped_fraction):
     if float(rms) < 0.002:
         return {**metrics, "accepted": False,
                 "reason": "YuE produced an almost silent candidate."}
+    # A healthy global RMS can hide a broken ending when the first part of the
+    # song is loud. Reject a sustained terminal collapse across the last two
+    # analysis windows; a normal short fade still retains meaningful energy in
+    # at least one of them.
+    if len(values) >= 6 and max(values[-2:]) < max(0.003, loudest * 0.08):
+        return {**metrics, "accepted": False,
+                "reason": ("YuE dropped to near silence for the end of this candidate. "
+                           "The incomplete arrangement was discarded; generate another variation.")}
     if float(clipped_fraction) >= 0.001 and loudest >= 0.45 and ratio >= 4.0:
         return {**metrics, "accepted": False,
                 "reason": ("YuE's decoded candidate became unstable and clipped after starting normally. "
