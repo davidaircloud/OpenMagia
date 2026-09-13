@@ -166,16 +166,16 @@
             <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" aria-label="Lyrics" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
           </div>
           <div class="generationGrid musicGrid">
-            <div class="field"><label>Structure <span class="info" tabindex="0" role="img" aria-label="About song planning" data-tooltip="Full and Melody use a supplied score. Without a score, instrumental music uses Direct so the complete style brief controls the arrangement.">i</span></label>
+            <div class="field"><label>Structure <span class="info" tabindex="0" role="img" aria-label="About song planning" data-tooltip="Full plans melody and chords; Melody plans melody with free accompaniment; Direct skips symbolic planning. A complete supplied score can be used with Full or Melody.">i</span></label>
               <select class="txt" id="musicPlan"><option value="full" selected>Full plan · score first</option><option value="melody">Melody only</option><option value="off">Off · straight to audio</option></select></div>
             <div class="field"><label>Voice <span class="info" tabindex="0" role="img" aria-label="About the vocal" data-tooltip="YuE 2 has no instrumental mode. This writes an [Instrumental] section and asks for an arrangement with no lead vocal — a style direction, not a switch. Sung words always win.">i</span></label>
               <select class="txt" id="musicVocal"><option value="lead" selected>Lead vocal</option><option value="instrumental">No lead vocal</option></select></div>
             <div class="field"><label>Seed <span class="info" tabindex="0" role="img" aria-label="About the seed" data-tooltip="Same description, lyrics and seed reproduce the same take. New seed, new arrangement.">i</span></label>
               <div class="slider-row"><input class="txt" type="number" id="musicSeed" value="4242" min="0" step="1" inputmode="numeric"><button id="musicRandom" class="btn ghost sm" title="New seed, same song">Random</button></div></div>
           </div>
-          <details class="musicAdvanced"><summary>Advanced</summary><div class="fld musicAbcField"><span>ABC score <em>Optional motif</em></span>
-            <textarea class="txt" id="musicAbc" rows="3" spellcheck="false" aria-label="ABC score" placeholder="X:1&#10;Q:1/4=92&#10;K:Dm&#10;|: d2 f2 e2 c2 :|"></textarea>
-            <small>Use ABC notation when an exact melody or recurring project theme must guide the song.</small>
+          <details class="musicAdvanced"><summary>Advanced</summary><div class="fld musicAbcField"><span>ABC score <em>Optional complete score</em></span>
+            <textarea class="txt" id="musicAbc" rows="3" spellcheck="false" aria-label="ABC score" placeholder="Paste a complete native YuE two-voice ABC score"></textarea>
+            <small>A supplied score replaces YuE's symbolic planning and requires Full or Melody. Use a score exported by YuE and validate edits with its ABC tools.</small>
           </div></details>
           <div id="musicCompile" class="musicCompile" aria-live="polite"></div>
           <div class="composerBar"><button id="musicSkillBtn" class="composerTool">✣ Skills</button><button id="musicClearBtn" class="composerTool">Clear lyrics</button></div>

@@ -4,6 +4,7 @@ These tests are the guard against the two ways this feature could lie: offering 
 control YuE 2 ignores, or rewriting the artist's words on the way to the model.
 """
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -134,6 +135,22 @@ class RequestCompiler(unittest.TestCase):
         healthy = yue_worker.classify_audio_quality(
             [0.08, 0.1, 0.16, 0.22, 0.3], 0.97, 0.18, 0.0001)
         self.assertTrue(healthy["accepted"])
+
+    def test_planned_score_must_pass_yues_native_inspector(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            tool = root / "skills" / "yue2-music" / "scripts" / "abc_tools.py"
+            tool.parent.mkdir(parents=True)
+            tool.write_text("# test tool\n")
+            score = root / "score.abc"
+            score.write_text("malformed")
+            failed = SimpleNamespace(returncode=2, stdout="",
+                                     stderr="ABC check failed: group 9, Vocal: bad barline")
+            with mock.patch("yue_worker.subprocess.run", return_value=failed):
+                checked = yue_worker.inspect_abc_score(score, root)
+            self.assertFalse(checked["accepted"])
+            self.assertIn("group 9, Vocal", checked["reason"])
+            self.assertIn("discarded", checked["reason"])
 
 
 class ParamsAndScene(unittest.TestCase):

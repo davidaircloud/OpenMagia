@@ -43,8 +43,10 @@ instrumental, or inpainting argument. Tempo and meter go in the style text or
 the ABC. YuE2 runs on a BF16-capable NVIDIA GPU with 24 GB VRAM, one request at
 a time, and reports progress on stderr as
 `[YuE2] Running <stage label>: 512/4096 tokens (12%) | … elapsed 61.0s`.
-It writes `audio.flac`, `score.abc`, `plan.json`, `result.json` (with
-`truncated` flags), or `failure.json`.
+The worker writes `audio.flac`, `score.abc`, `plan.json`, `result.json` (with
+`truncated` flags), or `failure.json` in its job directory. OpenMagia imports
+the finished audio and validated `score.abc` into the project. The remaining
+runtime artifacts are not currently exposed as an in-app editing history.
 
 ## Design decisions
 
@@ -117,7 +119,8 @@ control duration or a reference recording.
 6. The finished audio is stored as the FLAC the runtime produced (48 kHz stereo,
    no re-encode, no quality loss), registered as `kind: "audio"`, and clipped
    onto the first audio track (created when needed) after existing audio. The
-   planned `score.abc` is saved beside the media as `media/gen-<id>.abc`, and the
+   planned `score.abc` is first checked with YuE's native-dialect inspector, then
+   saved beside the media as `media/gen-<id>.abc`, and the
    compile audit - what left the lyric, what was moved to style, the length band -
    is stored on the media record under `generation.music`.
 7. Failure keeps the scene in `error` with the upstream reason; the worker's
@@ -179,11 +182,22 @@ What those measurements changed in the code, not just in the prose:
 
 - Semantic rate is 23-26 tokens/s on MPS at roughly 23 tokens per second of audio, so
   duration estimates are calibrated against a measurement.
-- Nothing sung plus no score forces `cot: off`. Melody planning with no pitch input plans
-  an endless score, and an instrumental *section arc* made the runaway longer, not
-  shorter: sections are more material, never a length control.
+- Full and Melody can plan a new score without supplied ABC. Supplying a complete
+  native YuE score bypasses that symbolic planning and requires Full or Melody.
+  Wordless generation remains seed-sensitive and has no duration control; section
+  labels describe form but do not guarantee length or a valid ending.
 - `yue_worker.py --max-tokens` (default 6,000, about four minutes) stops a runaway cue and
   fails the job with the reason. Without it the process dies in an OOM kill and the
   artist sees only a spinner.
 - YuE 2 decodes audio only at the end, so cancelling never keeps partial audio. The UI
   states that instead of implying a keep-what-you-got safety net.
+
+## Editing boundary
+
+YuE's documented editing workflow preserves the original request and score, edits a
+copy of `score.abc`, validates and compares it with `abc_tools.py`, then renders a new
+complete recording with `cot: full`. Even unchanged notation can produce a different
+performance. OpenMagia currently supports supplying a complete ABC score as generation
+input and saves the generated score beside the audio; it does not yet provide score
+editing, source-versus-edit comparison, or versioned full artifact directories in the
+UI. A saved score alone should not be described as a complete editing implementation.

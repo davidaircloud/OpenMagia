@@ -73,7 +73,7 @@ Trim, split, freeze, layer, detach audio, and arrange clips on a multi-track tim
 - **Manage assets once** across projects, including generated media, imported footage, character references, frozen frames, and audio.
 - **Edit non-destructively** with clip-level transforms, color, masks, effects, transitions, overlays, and audio controls.
 - **Export honestly** through FFmpeg using the same layout and transition intent shown by the preview.
-- **Compose songs, not just clips** with YuE 2: a style description and your lyrics become a finished stereo song on the audio track, with the ABC score it planned from kept as a reviewable artefact.
+- **Compose songs, not just clips** with YuE 2: a style description and your lyrics become a finished stereo song on the audio track. Its planned ABC score is saved beside the audio for inspection or an external score-editing workflow.
 - **Extend locally** with permissioned plugins and reusable prompt skills.
 
 ## Install

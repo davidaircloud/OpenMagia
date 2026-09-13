@@ -95,6 +95,28 @@ def analyze_audio_quality(path):
     except Exception as exc:
         return {"accepted": True, "reason": "quality analysis unavailable", "detail": str(exc)[:160]}
 
+
+def inspect_abc_score(path, yue_root):
+    """Run YuE's shipped native-dialect validator on a planned score."""
+    tool = Path(yue_root) / "skills" / "yue2-music" / "scripts" / "abc_tools.py"
+    if not tool.is_file():
+        return {"accepted": False,
+                "reason": "YuE's ABC inspection tool is missing from this runtime."}
+    try:
+        checked = subprocess.run(
+            [sys.executable, str(tool), "inspect", str(path)],
+            cwd=str(yue_root), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"accepted": False, "reason": f"Could not inspect YuE's planned score: {exc}"}
+    if checked.returncode:
+        detail = (checked.stderr or checked.stdout or "invalid ABC score").strip()
+        detail = re.sub(r"^ABC check failed:\s*", "", detail)[:320]
+        return {"accepted": False,
+                "reason": ("YuE produced an invalid score, so this candidate was discarded before "
+                           f"it could be published with a damaged ending: {detail}")}
+    return {"accepted": True, "reason": ""}
+
 try:
     from yue_prompts import parse_yue_progress   # one progress parser, one truth
 except ImportError as exc:                      # noqa: BLE001
@@ -319,6 +341,17 @@ class Worker:
                               "Retry to generate a complete variation.")
                 self.note(f"rejected {song.id}: truncated output")
                 return
+            # YuE's editing contract requires every generated score to pass its
+            # native-dialect inspector before reuse. This also catches malformed
+            # plans that can decode into a plausible opening and a broken ending.
+            if score.exists() and str(song.request.get("cot") or "full") != "off":
+                score_check = inspect_abc_score(score, self.args.cwd)
+                song.result["score_check"] = score_check
+                if not score_check.get("accepted"):
+                    song.status = "error"
+                    song.error = score_check["reason"]
+                    self.note(f"rejected {song.id}: {song.error}")
+                    return
             quality = analyze_audio_quality(audio)
             song.result["quality"] = quality
             if not quality.get("accepted", True):
