@@ -739,11 +739,13 @@ function renderTimeline() {
   const rows = $('#tlRows'); rows.innerHTML = '';
   for (const tr of state.tracks) {
     const hasTransform = tr.kind === 'video' && tr.clips.some(clipHasAnimation);
-    const row = div('tlrow' + (tr.kind === 'audio' ? ' audio' : '') + (hasTransform ? ' has-keyframes' : '')+(tr.muted?' muted':''));
+    const hasAudioAutomation=tr.kind==='audio'&&tr.clips.some(c=>c.audioFade&&((+c.audioFade.in||0)>0||(+c.audioFade.out||0)>0));
+    const row = div('tlrow' + (tr.kind === 'audio' ? ' audio' : '') + ((hasTransform||hasAudioAutomation) ? ' has-keyframes' : '')+(tr.muted?' muted':''));
     if(tr.kind==='video'){
       const automationRows=Math.max(0,...tr.clips.map(c=>transformPoints(c).length?1+transitionItems(c).length:transitionItems(c).length));
       if(automationRows)row.style.minHeight=(58+automationRows*23)+'px';
     }
+    if(hasAudioAutomation)row.style.minHeight='81px';
     row.dataset.track = tr.id;
     const head = div('tlhead');
     head.title = 'Drag to reorder this lane';
@@ -866,7 +868,9 @@ function renderClip(tr, c) {
   el.appendChild(body);
   const clipPoints = tr.kind === 'video' ? transformPoints(c) : [];
   const clipTransitions = tr.kind==='video'?transitionItems(c):[];
-  const automationRows=(clipPoints.length?1:0)+clipTransitions.length;if(automationRows)body.style.bottom=(4+automationRows*23)+'px';
+  const hasAudioFades=tr.kind==='audio'&&!!c.audioFade&&((+c.audioFade.in||0)>0||(+c.audioFade.out||0)>0);
+  const automationRows=(clipPoints.length?1:0)+clipTransitions.length+(hasAudioFades?1:0);if(automationRows)body.style.bottom=(4+automationRows*23)+'px';
+  if(hasAudioFades)appendAudioFadeRail(el,c);
   if (clipPoints.length) {
     const rail = div('keyframeRail transformRail');
     rail.style.bottom=(6+clipTransitions.length*23)+'px';
@@ -1525,7 +1529,7 @@ function renderClipInsp(body, hint, id) {
     ['transitions','Transitions','<svg viewBox="0 0 24 24"><path d="M4 6h10M10 3l4 3-4 3M20 18H10M14 15l-4 3 4 3"/></svg>'],
     ['effects','Effects','<svg viewBox="0 0 24 24"><path d="m15 4 5 5L8 21l-5-5L15 4ZM6 14l5 5M5 4v4M3 6h4M19 15v4M17 17h4"/></svg>']
   ];
-  const available=new Set(isAudio?['clip']:['clip','transform',...(isVideo?['color','animate','transitions','effects']:['animate','effects'])]);
+  const available=new Set(isAudio?['clip','animate','effects']:['clip','transform',...(isVideo?['color','animate','transitions','effects']:['animate','effects'])]);
   if(!available.has(inspectorClipTab))inspectorClipTab='clip';
   const nav=div('clipInspectorTabs');nav.setAttribute('role','tablist');nav.setAttribute('aria-label','Clip controls');
   const panels=div('clipInspectorPanels'),panelById={};
@@ -1543,7 +1547,7 @@ function renderClipInsp(body, hint, id) {
 
   const clipPanel=panelById.clip;
   identityFields.forEach(field=>clipPanel.appendChild(field));
-  clipPanel.appendChild(appliedEffectsField(c,activate));
+  clipPanel.appendChild(appliedEffectsField(c,activate,isAudio));
   clipPanel.appendChild(numField('Timeline start', c.start, 0, 9999, 0.01, v => putClip(c, { start: v })));
   clipPanel.appendChild(numField('Trim in', c.in, 0, m ? m.duration : 9999, 0.01, v => putClip(c, { in: Math.min(v, c.out - 0.05) })));
   clipPanel.appendChild(numField('Trim out', c.out, 0, (m && m.kind === 'image') ? 60 : (m ? m.duration : 9999), 0.01, v => putClip(c, { out: Math.max(v, c.in + 0.05) })));
@@ -1600,7 +1604,8 @@ function renderClipInsp(body, hint, id) {
     effects.appendChild(blurEffectField(c));
     effects.appendChild(maskEffectField(c));
   }
-  if(isAudio||isVideo){clipPanel.appendChild(audioFadeField(c));clipPanel.appendChild(audioProcessingField(c));}
+  if(isAudio){panelById.animate.appendChild(audioFadeField(c));panelById.effects.appendChild(audioProcessingField(c));}
+  else if(isVideo){clipPanel.appendChild(audioFadeField(c));clipPanel.appendChild(audioProcessingField(c));}
   clipPanel.appendChild(toggleRow('Mute clip', c.muted, v => putClip(c, { muted: v })));
   const del = div('field'); const db = document.createElement('button'); db.className = 'btn ghost'; db.textContent = 'Delete clip';
   db.style.color = 'var(--err)'; db.addEventListener('click', () => deleteClip(c)); del.appendChild(db); clipPanel.appendChild(del);
@@ -1695,6 +1700,12 @@ function audioFadeField(c){
   const note=document.createElement('small');note.className='audioFadeNote';note.textContent='Smooth the clip volume at its beginning and end.';field.appendChild(note);
   const add=(key,label)=>{const wrap=div('precisionField'),head=div('precisionHead'),lab=document.createElement('label');lab.textContent=label;head.appendChild(lab);const value=div('precisionValue hasUnit'),number=document.createElement('input');number.type='number';number.className='precisionNumber';number.min=0;number.max=duration;number.step=.01;number.value=clamp(+fades[key]||0,0,duration).toFixed(2);const unit=document.createElement('span');unit.textContent='s';value.append(number,unit);head.appendChild(value);wrap.appendChild(head);const range=document.createElement('input');range.type='range';range.min=0;range.max=duration;range.step=.01;range.value=number.value;let raf=0;const redraw=()=>{raf=0;drawNow();renderTimeline();};const apply=(raw,save)=>{const v=clamp(+raw||0,0,duration);number.value=v.toFixed(2);range.value=String(v);fades[key]=v;c.audioFade={...fades};if(!raf)raf=requestAnimationFrame(redraw);if(save){if(raf){cancelAnimationFrame(raf);raf=0;}redraw();putClip(c,{audioFade:c.audioFade},false);}};range.addEventListener('input',()=>apply(range.value,false));range.addEventListener('change',()=>apply(range.value,true));number.addEventListener('change',()=>apply(number.value,true));wrap.appendChild(range);field.appendChild(wrap);};
   add('in','Fade in');add('out','Fade out');return field;
+}
+function appendAudioFadeRail(el,c){
+  const duration=Math.max(.05,c.out-c.in),fades={in:0,out:0,...(c.audioFade||{})},rail=div('keyframeRail audioFadeRail'),label=div('keyframeLabel');
+  label.textContent='Audio level · fade in '+(+fades.in||0).toFixed(2)+'s · fade out '+(+fades.out||0).toFixed(2)+'s';rail.appendChild(label);
+  const add=(edge,seconds)=>{const diamond=document.createElement('button'),at=edge==='in'?clamp(seconds/duration,0,1):clamp(1-seconds/duration,0,1);diamond.className='timelineKeyframe audioKeyframe';diamond.style.left=(at*100)+'%';diamond.title=(edge==='in'?'Fade in ends':'Fade out starts')+' at '+(at*duration).toFixed(2)+'s';diamond.setAttribute('aria-label',diamond.title);diamond.addEventListener('pointerdown',event=>{if(event.button!==0)return;event.preventDefault();event.stopPropagation();let ratio=at;diamond.setPointerCapture?.(event.pointerId);diamond.classList.add('dragging');const move=e=>{const rect=rail.getBoundingClientRect();ratio=clamp((e.clientX-rect.left)/Math.max(1,rect.width),0,1);const value=edge==='in'?ratio*duration:(1-ratio)*duration;fades[edge]=value;c.audioFade={...fades};diamond.style.left=(ratio*100)+'%';label.textContent='Audio level · fade in '+(+fades.in||0).toFixed(2)+'s · fade out '+(+fades.out||0).toFixed(2)+'s';drawNow();};const up=e=>{move(e);diamond.classList.remove('dragging');window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);putClip(c,{audioFade:c.audioFade},false);};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);});rail.appendChild(diamond);};
+  add('in',+fades.in||0);add('out',+fades.out||0);el.appendChild(rail);
 }
 function rangeField(label, val, min, max, step, onInput) {
   const f = div('field'); const lab = document.createElement('label'); lab.textContent = label; f.appendChild(lab);
@@ -1829,7 +1840,7 @@ function audioProcessingField(c){
   for(const [key,name] of [['voice','Voice filter'],['denoise','Noise reduction'],['compress','Compression'],['loudness','Loudness normalization']])field.appendChild(toggleRow(name,!!value[key],enabled=>putClip(c,{audioProcessing:{...value,[key]:enabled}})));
   return field;
 }
-function appliedEffectsField(c,activate){
+function appliedEffectsField(c,activate,isAudio=false){
   const field=div('field appliedEffects');
   const title=document.createElement('label');title.textContent='Applied effects';field.appendChild(title);
   const note=div('effectStatus');note.textContent='Different types combine. Presets replace previous preset settings on the chosen clips.';field.appendChild(note);
@@ -1839,8 +1850,8 @@ function appliedEffectsField(c,activate){
     ['color','Color','color',!!c.color,{color:null}],
     ['blur','Blur','effects',!!c.blur,{blur:null}],
     ['overlays','Mask / overlay layout','effects',!!c.mask,{mask:null}],
-    ['audio','Audio fades','clip',!!c.audioFade,{audioFade:null}],
-    ['audio_cleanup','Audio processing','clip',!!c.audioProcessing,{audioProcessing:null}],
+    ['audio','Audio fades',isAudio?'animate':'clip',!!c.audioFade,{audioFade:null}],
+    ['audio_cleanup','Audio processing',isAudio?'effects':'clip',!!c.audioProcessing,{audioProcessing:null}],
     ['pacing','Preset pacing','clip',!!(c.magiaEffects||{}).pacing,{}]
   ];
   let count=0;

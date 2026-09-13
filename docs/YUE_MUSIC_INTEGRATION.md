@@ -144,9 +144,10 @@ control duration or a reference recording.
   while an eight-line lyric rendered 43.5 s. Any single "estimated duration" would
   have been theatre, so `estimated_band` (low, high) drives the wording "YuE 2 sets
   the length · expect roughly X–Y s".
-- **Runaway guard**: the worker takes `--max-tokens` (default 6000, about four
-  minutes of audio). A piece that never terminates fails with a stated reason
-  instead of being killed by the OS after eight minutes with nothing to show.
+- **Optional runaway guard**: the worker accepts `--max-tokens`, disabled by
+  default. Normal completion follows YuE's own generation budget and the
+  `result.json` truncation flags; operators can still add a lower ceiling for a
+  constrained machine.
 - **Skill type guard**: attaching a shot-writing skill to a music scene raises
   instead of letting a story formula rewrite the lyric.
 
@@ -186,9 +187,8 @@ What those measurements changed in the code, not just in the prose:
   native YuE score bypasses that symbolic planning and requires Full or Melody.
   Wordless generation remains seed-sensitive and has no duration control; section
   labels describe form but do not guarantee length or a valid ending.
-- `yue_worker.py --max-tokens` (default 6,000, about four minutes) stops a runaway cue and
-  fails the job with the reason. Without it the process dies in an OOM kill and the
-  artist sees only a spinner.
+- `yue_worker.py --max-tokens` is an optional local limit. It is not enabled by
+  default because stopping below YuE's own budget can discard a valid long song.
 - YuE 2 decodes audio only at the end, so cancelling never keeps partial audio. The UI
   states that instead of implying a keep-what-you-got safety net.
 
