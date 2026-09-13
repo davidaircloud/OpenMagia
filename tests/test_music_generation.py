@@ -64,7 +64,7 @@ class RequestCompiler(unittest.TestCase):
         self.assertIn("duration", kinds)
         self.assertFalse(compiled["audit"]["score_generated"])
         self.assertNotIn("abc", compiled["request"])
-        self.assertEqual(compiled["request"]["cot"], "off")
+        self.assertEqual(compiled["request"]["cot"], "full")
 
     def test_artist_score_is_preserved_instead_of_replaced(self):
         score = "X:1\nM:4/4\nK:Dm\nD2 F2 A4 |]"
@@ -275,7 +275,7 @@ class Skills(unittest.TestCase):
         with mock.patch.object(server, "formatter_available", return_value=False):
             result = server.refine_music_brief("Lo-fi piano, instrumental, no lead vocal")
         self.assertTrue(result["instrumental"])
-        self.assertEqual("off", result["plan_mode"])
+        self.assertEqual("full", result["plan_mode"])
         self.assertEqual("[Instrumental]", result["lyrics"])
 
     def test_music_refiner_cannot_replace_a_rich_brief_with_generic_tags(self):
@@ -287,7 +287,7 @@ class Skills(unittest.TestCase):
              mock.patch.object(server, "run_formatter_command", return_value=generic):
             result = server.refine_music_brief(original, instrumental=True)
         self.assertEqual(original, result["style"])
-        self.assertEqual(result["plan_mode"], "off")
+        self.assertEqual(result["plan_mode"], "full")
 
     def test_long_music_refinement_ends_at_a_complete_sentence(self):
         text = ("Detailed arrangement with piano, bass, drums, texture, and dynamics. " * 30).strip()

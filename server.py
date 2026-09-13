@@ -877,7 +877,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False, skill_c
     idea, lyrics = normalize_music_brief_text(idea), str(lyrics or "").strip()
     vocal_intent = music_vocal_intent(idea)
     instrumental = vocal_intent == "instrumental" or (vocal_intent == "unspecified" and bool(instrumental))
-    plan_mode = "off" if instrumental else "full"
+    plan_mode = "full"
     if not idea and not lyrics:
         raise ValueError("Describe the song or provide lyrics first.")
     if instrumental:
@@ -901,7 +901,7 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False, skill_c
         "The style value must contain musical and production direction only and stand alone as the complete instruction sent to a music generator. "
         "Describe requested vocals by character, placement, and frequency. Never mention JSON fields, booleans, switches, plan_mode, or whether instrumentals are on or off inside style. "
         "Do not repeat sentences or output category labels. "
-        "Set plan_mode to full for vocals and off for instrumental music without a supplied score.\n"
+        "Set plan_mode to full for a new song, including an instrumental; use off only when the artist explicitly asks for direct generation.\n"
         f"SKILL: {direction}\nBRIEF: {idea}")
     cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "700", "--temp", "0.3",
            "--seed", "0", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
@@ -916,9 +916,9 @@ def refine_music_brief(idea, lyrics="", skill_id="", instrumental=False, skill_c
             if run.returncode == 0 and style:
                 return {"style": merge_music_style(idea, style),
                         "lyrics": yue_prompts.INSTRUMENTAL_LYRICS, "instrumental": True,
-                        "plan_mode": "off", "used_ai": True}
+                        "plan_mode": "full", "used_ai": True}
             return {"style": fallback_style, "lyrics": yue_prompts.INSTRUMENTAL_LYRICS,
-                    "instrumental": True, "plan_mode": "off", "used_ai": False}
+                    "instrumental": True, "plan_mode": "full", "used_ai": False}
         original_lines = [line for line in lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         refined_lines = [line for line in refined_lyrics.splitlines() if line.strip() and not line.strip().startswith("[")]
         lyrics_preserved = (not lyrics and not refined_lyrics) or (bool(lyrics) and original_lines == refined_lines)

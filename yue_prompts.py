@@ -284,11 +284,11 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         clean_lyrics = INSTRUMENTAL_LYRICS
     requested_plan = mode
     score = normalize_abc(abc)
-    if instrumental and not score:
-        # A fabricated four-chord ABC made unrelated prompts converge on the same
-        # thin arrangement. Without an artist-authored score, direct generation
-        # leaves orchestration under the rich style brief, as YuE intends.
-        mode = "off"
+    # Full planning can create a new melody-and-chord plan without supplied ABC.
+    # An ABC input is only needed when the artist wants to provide or preserve a
+    # specific composition. Keep the requested mode for new instrumentals too;
+    # silently forcing Direct used to discard their planned structure and often
+    # produced short, texture-only audio.
     style = compile_style_tags(style=idea_text, answers=answers, skill_direction=skill_direction,
                                instrumental=instrumental)
     try:
@@ -308,9 +308,6 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         request["cfg_scale"] = float(guidance)
     validate_music_request(request)
     warnings = []
-    if mode != requested_plan:
-        warnings.append({"kind": "planning", "level": "info",
-                         "text": "Direct generation keeps the full instrumental brief in control when no score is supplied."})
     if instrumental:
         warnings.append({"kind": "duration", "level": "info",
                          "text": ("YuE 2 decides the instrumental length. OpenMagia rejects "
