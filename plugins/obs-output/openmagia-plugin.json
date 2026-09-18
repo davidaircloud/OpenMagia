@@ -1,0 +1,11 @@
+{
+  "manifestVersion": 1,
+  "id": "org.openmagia.obs-output",
+  "name": "OBS Output",
+  "version": "1.0.0",
+  "description": "Open a clean live program window and connect its picture and browser audio to OBS.",
+  "author": {"name": "OpenMagia"},
+  "license": "AGPL-3.0-only",
+  "ui": "index.html",
+  "permissions": ["output.open"]
+}

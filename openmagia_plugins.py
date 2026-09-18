@@ -24,7 +24,7 @@ KNOWN_PERMISSIONS = {
     "project.read", "project.write", "media.read", "media.write",
     "timeline.read", "timeline.write", "generation.read", "generation.create",
     "generation.events", "notifications.email", "notifications.imessage",
-    "storage",
+    "storage", "output.open",
 }
 
 

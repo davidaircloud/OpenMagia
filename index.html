@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenMagia</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260905-cast-picker-2">
+<link rel="stylesheet" href="style.css?v=20260918-hub-playhead">
 </head>
 <body>
 
@@ -54,8 +55,8 @@
         <div id="timecode">00:00.000 <small>/ 00:00.000</small></div>
         <div class="spacer"></div>
         <button class="tbtn" id="pluginsBtn" title="Plugins" aria-label="Open plugins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8.5 3.5v4h-4v4a2.5 2.5 0 1 0 0 5v4h4v-2a2.5 2.5 0 1 1 5 0v2h4v-4h2a2.5 2.5 0 1 0 0-5h-2v-4h-4v-2a2.5 2.5 0 1 0-5 0v2"/></svg></button>
-        <div class="tlabel">LOOP</div>
-        <button class="tbtn" id="loopBtn" title="Loop playback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button>
+        <button class="tbtn" id="loopBtn" title="Loop the whole timeline" aria-label="Loop timeline" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg><span>Loop</span></button>
+        <button class="tbtn" id="programOutputBtn" title="Open clean preview for OBS">Preview ↗</button>
         <div class="tlabel" style="margin-left:4px">MUTE</div>
         <button class="tbtn" id="muteBtn" title="Mute all audio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/></svg></button>
       </div>
@@ -228,25 +229,25 @@
   <aside class="sheetPanel timelineMagiaPanel" role="dialog" aria-modal="true" aria-labelledby="timelineMagiaTitle">
     <div class="sheetHead"><div><h2 id="timelineMagiaTitle">Magia</h2><p>Polish the timeline with editable effects.</p></div><button id="timelineMagiaClose" class="sheetClose" aria-label="Close">×</button></div>
     <div class="sheetPanelBody timelineMagiaBody">
-      <section class="timelineMagiaRecipes"><div class="timelineMagiaRecipeHead"><span><strong>Editing recipe</strong><small>Replaces previous preset settings in the chosen scope. Unchecked types restore their pre-preset values.</small></span><button id="timelineMagiaExampleToggle" type="button">View recipe notes</button></div><div id="timelineMagiaRecipeList" class="timelineMagiaRecipeList">
-        <button data-magia-recipe="subtle" class="on">Subtle</button><button data-magia-recipe="narrative">Narrative</button><button data-magia-recipe="social">Social</button><button data-magia-recipe="cinematic">Cinematic</button><button data-magia-recipe="audio-first">Audio-first</button>
-      </div><p id="timelineMagiaApplied" class="timelineMagiaApplied" hidden></p></section>
-      <label>Direction<textarea id="timelineMagiaDirection" class="txt" placeholder="Optional mood, rhythm, or editing direction…"></textarea></label>
-      <label>Apply to<select id="timelineMagiaScope" class="txt"><option value="timeline">Entire timeline</option><option value="selected">Selected clip</option></select></label>
-      <div class="timelineMagiaSkillGroup"><h3>Picture</h3><div class="timelineMagiaSkills" aria-label="Picture editing skills">
-        <label><input type="checkbox" data-timeline-magia-option="transitions" checked><span><strong>Transitions</strong><small>Blend compatible clip edges.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="transforms" checked><span><strong>Motion & reframing</strong><small>Compose zoom, drift, and position.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="color" checked><span><strong>Color</strong><small>Balance clips into one look.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="overlays" checked><span><strong>Overlays</strong><small>Place and soften overlay clips.</small></span></label>
+      <input id="timelineMagiaMode" type="hidden" value="stack">
+      <label>Apply to<select id="timelineMagiaScope" class="txt"><option value="timeline">Entire timeline</option><option value="selected">Selected clip</option></select><small id="timelineMagiaScopeHint" class="magiaFieldHint"></small></label>
+      <section class="timelineMagiaRecipes"><label for="timelineMagiaRecipe">Treatment</label><select id="timelineMagiaRecipe" class="txt"><option value="subtle">Subtle polish</option><option value="narrative">Narrative flow</option><option value="social">Social energy</option><option value="cinematic">Cinematic</option><option value="audio-first">Audio-first clarity</option></select><button id="timelineMagiaExampleToggle" type="button" class="sheetFolderBack">View treatment details</button></section>
+      <label>Tell Magia what you want<textarea id="timelineMagiaDirection" class="txt" placeholder="For example: calm pacing, longer fades, warm color, and gentle motion…"></textarea><small class="magiaFieldHint">Optional. Describe the mood, rhythm, transitions, picture, or sound you want.</small></label>
+      <section class="magiaOptions"><div class="magiaOptionsHead"><div><strong>Effects</strong><small id="magiaOptionsCount">None selected</small></div><div><button id="timelineMagiaSelectAll" type="button">Select all</button><button id="timelineMagiaClearAll" type="button">Clear</button></div></div><div class="timelineMagiaSkillGroup"><h3>Picture</h3><div class="timelineMagiaSkills" aria-label="Picture editing skills">
+        <label><input type="checkbox" data-timeline-magia-option="transitions"><span><strong>Transitions</strong><small>Blend compatible clip edges.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="transforms"><span><strong>Motion & reframing</strong><small>Stack a transform lane on each clip.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="color"><span><strong>Color</strong><small>Balance clips into one look.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="overlays"><span><strong>Cutaway overlays</strong><small>Add brief full-frame visual accents.</small></span></label>
       </div></div>
       <div class="timelineMagiaSkillGroup"><h3>Rhythm</h3><div class="timelineMagiaSkills oneColumn" aria-label="Rhythm editing skills">
-        <label><input type="checkbox" data-timeline-magia-option="pacing" checked><span><strong>Pacing</strong><small>Tighten gaps and preserve legal clip timing.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="pacing"><span><strong>Pacing</strong><small>Tighten gaps and preserve legal clip timing.</small></span></label>
       </div></div>
       <div class="timelineMagiaSkillGroup"><h3>Sound</h3><div class="timelineMagiaSkills" aria-label="Sound editing skills">
-        <label><input type="checkbox" data-timeline-magia-option="audio" checked><span><strong>Edge fades</strong><small>Smooth audio at clip boundaries.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="audio_cleanup" checked><span><strong>Voice cleanup</strong><small>Reduce steady noise and control speech dynamics.</small></span></label>
-        <label><input type="checkbox" data-timeline-magia-option="loudness" checked><span><strong>Loudness</strong><small>Target consistent programme level and safe peaks.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="audio"><span><strong>Edge fades</strong><small>Smooth audio at clip boundaries.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="audio_cleanup"><span><strong>Voice cleanup</strong><small>Export only · reduce noise and control speech dynamics.</small></span></label>
+        <label><input type="checkbox" data-timeline-magia-option="loudness"><span><strong>Loudness</strong><small>Export only · normalize programme level and peaks.</small></span></label>
       </div></div>
+      </section>
       <div id="timelineMagiaPlan" class="timelineMagiaPlan" aria-live="polite"></div>
       <section id="timelineMagiaExamples" class="timelineMagiaExamples" hidden></section>
     </div>
@@ -464,6 +465,6 @@
 <input type="file" id="importFile" accept="video/*,image/*" multiple style="display:none">
 <input type="file" id="charFile" accept="image/*" style="display:none">
 
-<script src="app.js?v=20260905-cast-picker-2"></script>
+<script src="app.js?v=20260918-live-inspector"></script>
 </body>
 </html>

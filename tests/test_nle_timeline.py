@@ -11,6 +11,27 @@ import server
 
 
 class TimelineCompositionTests(unittest.TestCase):
+    def test_extract_frame_uses_accurate_output_seek(self):
+        commands = []
+
+        def fake_run(command):
+            commands.append(command)
+            if "-frames:v" in command:
+                Path(command[-1]).touch()
+            if "frame=best_effort_timestamp_time" in command:
+                return SimpleNamespace(returncode=0, stderr="", stdout="0.000000,\n2.500000\n3.000000\n")
+            return SimpleNamespace(returncode=0, stderr="", stdout='{"streams":[],"format":{"duration":"10"}}')
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run):
+            source = Path(tmp) / "screen-recording.mp4"
+            source.touch()
+            output = Path(tmp) / "frame.png"
+            self.assertEqual(nle.extract_frame(source, output, 2.75), output)
+
+        frame_command = next(command for command in commands if "-frames:v" in command)
+        self.assertLess(frame_command.index("-i"), frame_command.index("-ss"))
+        self.assertEqual(frame_command[frame_command.index("-ss") + 1], "2.500")
+
     def test_h3_reference_args_keep_audio_and_images_distinct(self):
         refs = [
             {"kind": "visual_reference", "paths": [Path("look.png")]},
@@ -82,7 +103,8 @@ class TimelineCompositionTests(unittest.TestCase):
             commands.append(command)
             Path(command[-1]).touch()
             return SimpleNamespace(returncode=0, stderr="", stdout="")
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run), \
+                mock.patch.object(nle, "probe", return_value={"duration": 5, "w": 512, "h": 512, "hasAudio": False}):
             source = Path(tmp) / "source.mp4"; source.touch()
             nle.render_video_pre(clip, {"src": str(source), "kind": "video"},
                                  {"width": 512, "height": 512}, tmp)
@@ -141,6 +163,49 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertIn("tpad=stop_mode=add:stop_duration=1.500000", graph)
         self.assertIn("clip((2.000000000-T)/1.226000000,0,1)", graph)
         self.assertIn("a='alpha(X,Y)*(lte(", graph)
+
+    def test_audio_only_timeline_exports_mp3_with_authored_timing(self):
+        project = {
+            "name": "Live Mix",
+            "media": [
+                {"id": "a1", "src": "media/one.wav", "kind": "audio", "hasAudio": True},
+                {"id": "a2", "src": "media/two.wav", "kind": "audio", "hasAudio": True},
+            ],
+            "tracks": [
+                {"id": "V1", "kind": "video", "muted": False, "clips": []},
+                {"id": "A1", "kind": "audio", "muted": False, "clips": [
+                    {"id": "song", "mediaId": "a1", "start": 1.25, "in": 0, "out": 3},
+                    {"id": "voice", "mediaId": "a2", "start": 2.5, "in": 0, "out": 2},
+                ]},
+            ],
+        }
+        commands = []
+
+        def fake_render(clip, media, outdir):
+            target = Path(outdir) / (clip["id"] + ".m4a")
+            target.touch()
+            return target
+
+        def fake_run(command):
+            commands.append(command)
+            Path(command[-1]).touch()
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(nle, "render_audio_pre", side_effect=fake_render), \
+                mock.patch.object(nle, "run", side_effect=fake_run), \
+                mock.patch.object(nle.time, "strftime", return_value="20260916-120000"):
+            (Path(tmp) / "media").mkdir()
+            url = nle.export_project(project, tmp)
+
+        self.assertEqual(url, "/media/OpenMagia-Live-Mix-20260916-120000.mp3")
+        final = commands[-1]
+        self.assertIn("libmp3lame", final)
+        self.assertNotIn("-c:v", final)
+        graph = final[final.index("-filter_complex") + 1]
+        self.assertIn("adelay=1250|1250", graph)
+        self.assertIn("amix=inputs=2", graph)
+        self.assertIn("atrim=duration=4.500000", graph)
 
     def test_project_library_exposes_creation_and_modified_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1036,8 +1101,8 @@ class TimelineCompositionTests(unittest.TestCase):
         for update in first["updates"]:
             self.assertLessEqual(set(update["fields"]), allowed)
         overlay = next(item for item in first["updates"] if item["clip_id"] == "o1")
-        self.assertTrue(overlay["fields"]["mask"]["enabled"])
-        self.assertEqual(overlay["fields"]["mask"]["type"], "rectangle")
+        self.assertNotIn("mask", overlay["fields"])
+        self.assertIn("keyframes", overlay["fields"])
         base = next(item for item in first["updates"] if item["clip_id"] == "c2")
         self.assertTrue(base["fields"]["keyframes"]["enabled"])
         self.assertGreaterEqual(len(base["fields"]["keyframes"]["points"]), 3)
@@ -1052,7 +1117,8 @@ class TimelineCompositionTests(unittest.TestCase):
         clip = {"id": "voice", "in": 0, "out": 4, "volume": 1,
                 "audioProcessing": {"voice": True, "denoise": True, "compress": True,
                                     "loudness": True, "target_lufs": -16, "true_peak": -1.5}}
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run), \
+                mock.patch.object(nle, "probe", return_value={"duration": 4, "w": 0, "h": 0, "hasAudio": True}):
             source = Path(tmp) / "voice.wav"; source.touch()
             nle.render_audio_pre(clip, {"src": str(source)}, tmp)
         filters = commands[0][commands[0].index("-af") + 1]
@@ -1152,8 +1218,8 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertIn("color", base[0])
         self.assertIn("transition", base[1])
         overlay = project["tracks"][1]["clips"][0]
-        self.assertIn("mask", overlay)
-        self.assertIn("position", overlay)
+        self.assertNotIn("mask", overlay)
+        self.assertIn("keyframes", overlay)
 
     def test_timeline_magia_selected_scope_changes_only_selected_clip(self):
         project = self._timeline_magia_project()
@@ -1174,7 +1240,7 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertEqual(plan["summary"]["overlays"], len(created))
         self.assertTrue(all(item["create"]["magiaOverlay"] for item in created))
         self.assertTrue(all(item["create"]["position"] == {"x": 0, "y": 0} for item in created))
-        self.assertTrue(all(item["create"]["mask"]["type"] in {"split", "ellipse", "cinematic"} for item in created))
+        self.assertTrue(all(item["create"]["mask"]["enabled"] is False for item in created))
         self.assertTrue(all(len(item["create"]["transition"]["items"]) == 2 for item in created))
         self.assertEqual(server.apply_timeline_magia_plan(project, plan), len(created))
         overlays = project["tracks"][1]["clips"]

@@ -95,7 +95,29 @@ def extract_frame(src, out, at="first"):
                 t = max(0.0, min(float(at), max(0.0, dur - 0.04)))
             except (TypeError, ValueError):
                 t = 0.0
-        cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(src),
+            # Browser video holds the latest decoded frame until the next PTS.
+            # Seeking FFmpeg directly to a time in that hold selects the next
+            # stored frame instead, which is especially wrong for sparse/VFR
+            # screen recordings. Resolve the visible frame's PTS first.
+            ffprobe = shutil.which("ffprobe")
+            if ffprobe:
+                frames = run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                              "-show_entries", "frame=best_effort_timestamp_time",
+                              "-of", "csv=p=0", str(src)])
+                visible = []
+                for line in (frames.stdout or "").splitlines():
+                    try:
+                        pts = float(line.strip().rstrip(","))
+                    except (TypeError, ValueError):
+                        continue
+                    if pts <= t + 1e-6:
+                        visible.append(pts)
+                if visible:
+                    t = max(visible)
+        # Put -ss after the input for an accurate decoded-frame seek.  Fast
+        # input seeking can stop at a neighbouring keyframe, which is visible
+        # on screen recordings when a slide changes near the requested time.
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-ss", f"{t:.3f}",
                "-frames:v", "1", "-update", "1", str(out)]
     r = run(cmd)
     return out if (r.returncode == 0 and out.exists()) else None
@@ -149,34 +171,41 @@ def _image_motion_vf(clip, canvas):
 
 def _transform_keyframe_vf(clip, canvas, still=False):
     """Render Inspector transform points for both preview and final export."""
-    keyframes = clip.get("keyframes") or {}
-    if keyframes.get("enabled", True) is False:
-        return None
-    raw = keyframes.get("points") or []
-    points = []
-    for point in raw:
-        try:
-            points.append({"at": max(0.0, min(1.0, float(point.get("at", 0)))),
-                           "zoom": max(.1, float(point.get("zoom", 1))),
-                           "x": max(0.0, min(1.0, float(point.get("x", .5)))),
-                           "y": max(0.0, min(1.0, float(point.get("y", .5))))})
-        except (TypeError, ValueError):
-            continue
-    points.sort(key=lambda point: point["at"])
-    if not points:
+    def layer_points(keyframes):
+        if not keyframes or keyframes.get("enabled", True) is False:
+            return []
+        points = []
+        raw = keyframes.get("points") or []
+        if not raw and keyframes.get("start") and keyframes.get("end"):
+            base = max(.1, float(clip.get("zoom", 1) or 1))
+            raw = [{**keyframes[edge], "at": keyframes[edge].get("at", at),
+                    "zoom": float(keyframes[edge].get("zoom", base)) / base}
+                   for edge, at in (("start", 0), ("end", 1))]
+        for point in raw:
+            try:
+                points.append({"at": max(0.0, min(1.0, float(point.get("at", 0)))),
+                               "zoom": max(.1, float(point.get("zoom", 1))),
+                               "x": max(0.0, min(1.0, float(point.get("x", .5)))),
+                               "y": max(0.0, min(1.0, float(point.get("y", .5))))})
+            except (TypeError, ValueError):
+                continue
+        return sorted(points, key=lambda point: point["at"])
+    points = layer_points(clip.get("keyframes"))
+    layers = [p for layer in clip.get("transformLayers") or [] if (p := layer_points(layer.get("keyframes")))]
+    if not points and not layers:
         return None
     duration = max(.05, float(clip["out"]) - float(clip["in"]))
     frames = max(1, int(round(duration * FPS)))
     base_zoom = max(.1, float(clip.get("zoom", 1) or 1))
 
-    def expression(key, multiplier=1.0):
+    def expression(points, key, multiplier=1.0):
         def value(point):
             return point[key] * multiplier
         tail = f"{value(points[-1]):.6f}"
         for index in range(len(points) - 2, -1, -1):
             left, right = points[index], points[index + 1]
-            start = left["at"] * max(1, frames - 1)
-            end = right["at"] * max(1, frames - 1)
+            start = left["at"] * frames
+            end = right["at"] * frames
             if end <= start + 1e-6:
                 segment = f"{value(right):.6f}"
             else:
@@ -187,8 +216,28 @@ def _transform_keyframe_vf(clip, canvas, still=False):
         return tail
 
     W, H = canvas["width"], canvas["height"]
-    zoom = expression("zoom", base_zoom)
-    center_x, center_y = expression("x"), expression("y")
+    if points:
+        zoom = expression(points, "zoom", base_zoom)
+        center_x, center_y = expression(points, "x"), expression(points, "y")
+    else:
+        # Same preset values and time base as the browser's motionState.
+        progress = f"on/{frames}"
+        motion = (clip.get("motion") or {}).get("type", "none")
+        zoom = str(base_zoom)
+        center_x = center_y = "0.5"
+        if motion == "push-in": zoom = f"{base_zoom}*(1+0.4*{progress})"
+        elif motion == "pull-out": zoom = f"{base_zoom}*(1.4-0.4*{progress})"
+        elif motion.startswith("pan-"):
+            zoom = f"{base_zoom}*1.3"
+            if motion == "pan-left": center_x = f"0.6-0.2*{progress}"
+            elif motion == "pan-right": center_x = f"0.4+0.2*{progress}"
+            elif motion == "pan-up": center_y = f"0.6-0.2*{progress}"
+            elif motion == "pan-down": center_y = f"0.4+0.2*{progress}"
+    for layer in layers:
+        zoom = f"({zoom})*({expression(layer, 'zoom')})"
+        center_x = f"({center_x})+({expression(layer, 'x')})-0.5"
+        center_y = f"({center_y})+({expression(layer, 'y')})-0.5"
+    center_x, center_y = f"max(0,min(1,{center_x}))", f"max(0,min(1,{center_y}))"
     x = f"({center_x})*{2*W}-{W}/({zoom})"
     y = f"({center_y})*{2*H}-{H}/({zoom})"
     return [f"scale={2*W}:{2*H}:force_original_aspect_ratio=increase", f"crop={2*W}:{2*H}",
@@ -343,6 +392,19 @@ def render_video_pre(clip, media, canvas, outdir, mode="cover"):
     r = run(cmd)
     if r.returncode != 0 or not out.exists():
         raise RuntimeError(f"pre-render video failed: {r.stderr.strip()[-400:]}")
+    # Sparse/VFR screen recordings can have no stored frame inside a trim
+    # window even though the browser correctly holds the last decoded frame.
+    # FFmpeg then exits successfully but writes an empty MP4. Render that held
+    # frame as a still for the authored clip duration.
+    rendered = probe(out)
+    if not rendered.get("w") or not rendered.get("h"):
+        if _is_image(src):
+            raise RuntimeError("pre-render video failed: still image produced no video stream")
+        held = Path(outdir) / f"{clip['id']}-held.png"
+        out.unlink(missing_ok=True)
+        if not extract_frame(src, held, clip.get("in", 0)):
+            raise RuntimeError("pre-render video failed: the selected time range contains no decodable frame")
+        return render_video_pre(clip, {**media, "src": str(held)}, canvas, outdir, mode=mode)
     return out
 
 
@@ -376,7 +438,7 @@ def render_audio_pre(clip, media, outdir):
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn",
            "-af", ",".join(filters), "-c:a", "aac", "-b:a", "192k", str(out)]
     r = run(cmd)
-    if r.returncode != 0 or not out.exists():
+    if r.returncode != 0 or not out.exists() or not probe(out).get("hasAudio"):
         raise RuntimeError(f"pre-render audio failed: {r.stderr.strip()[-400:]}")
     return out
 
@@ -495,6 +557,52 @@ def export_project(project, root):
             total = max(total, c["start"] + _clip_dur(c))
     if total <= 0:
         raise RuntimeError("nothing to export — add clips to the timeline")
+
+    # An audio-only timeline is a first-class edit, not a video with a blank
+    # canvas. Preserve clip trims, processing, fades, volume, overlaps and
+    # authored gaps, then deliver the natural format for that timeline.
+    video_clips = [c for t in vtracks for c in t.get("clips", [])]
+    if not video_clips:
+        audio_items = []
+        for t in atracks:
+            for c in sorted(t.get("clips", []), key=lambda item: item["start"]):
+                m = media[c["mediaId"]]
+                if c.get("muted") or _is_image(m["src"]) or not m.get("hasAudio"):
+                    continue
+                rendered = render_audio_pre(c, m, pre)
+                audio_items.append((float(c["start"]), rendered))
+        if not audio_items:
+            raise RuntimeError("nothing audible to export — unmute or add an audio clip")
+
+        inputs = []
+        filters = []
+        labels = []
+        for i, (start, rendered) in enumerate(audio_items):
+            inputs.extend(["-i", str(rendered)])
+            delay = max(0, int(start * 1000))
+            filters.append(f"[{i}:a]adelay={delay}|{delay},apad[a{i}]")
+            labels.append(f"[a{i}]")
+        if len(labels) == 1:
+            filters.append(f"{labels[0]}anull,apad,atrim=duration={total:.6f}[audioFinal]")
+        else:
+            filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0,alimiter,"
+                           f"apad,atrim=duration={total:.6f}[audioFinal]")
+
+        project_label = re.sub(r"[^A-Za-z0-9]+", "-", str(project.get("name") or "project")).strip("-")[:48] or "project"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stem = f"OpenMagia-{project_label}-{stamp}"
+        out_mp3 = media_dir / f"{stem}.mp3"
+        suffix = 2
+        while out_mp3.exists():
+            out_mp3 = media_dir / f"{stem}-{suffix}.mp3"
+            suffix += 1
+        cmd = ["ffmpeg", "-y", "-v", "error", *inputs,
+               "-filter_complex", ";".join(filters), "-map", "[audioFinal]",
+               "-c:a", "libmp3lame", "-b:a", "192k", "-t", f"{total:.3f}", str(out_mp3)]
+        r = run(cmd)
+        if r.returncode != 0 or not out_mp3.exists():
+            raise RuntimeError(f"audio export failed: {r.stderr.strip()[-700:]}")
+        return "/media/" + out_mp3.name
 
     # Timeline order is camera order: the first video lane is visually on top.
     # Playback therefore uses the lowest occupied lane as its base and paints
@@ -650,26 +758,31 @@ def export_project(project, root):
                 render_audio_pre(c, m, pre)
             audio_items.append((c["start"], pre / f"{c['id']}.m4a", bool(c.get("muted"))))
 
-    mix_labels = []
-    ainputs = []
-    for i, (start, f, muted) in enumerate(audio_items):
-        if muted:
-            continue
-        idx = add_input(f)
-        delay = max(0, int(start * 1000))
-        ainputs.append(f"[{idx}:a]adelay={delay}|{delay},apad[a{i}]")
-        mix_labels.append(f"[a{i}]")
-    fc.extend(ainputs)
-
-    have_audio = bool(mix_labels)
-    if have_audio:
+    # Mix audio separately. Keeping audio inputs out of the already-complex
+    # video filter graph avoids FFmpeg binding failures when a sparse video
+    # intermediate contains no stream and shifts the graph's stream indexes.
+    audible = [(start, f) for start, f, muted in audio_items if not muted]
+    audio_map = None
+    if audible:
+        mixed = pre / "timeline-audio.m4a"
+        mix_inputs, mix_filters, mix_labels = [], [], []
+        for i, (start, rendered) in enumerate(audible):
+            mix_inputs.extend(["-i", str(rendered)])
+            delay = max(0, int(start * 1000))
+            mix_filters.append(f"[{i}:a]adelay={delay}|{delay},apad[a{i}]")
+            mix_labels.append(f"[a{i}]")
         if len(mix_labels) == 1:
-            fc.append(f"{mix_labels[0]}anull,apad[aout]")
+            mix_filters.append(f"{mix_labels[0]}anull,apad,atrim=duration={total:.6f}[audioFinal]")
         else:
-            fc.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:normalize=0,alimiter,apad[aout]")
-        audio_map = "[aout]"
-    else:
-        audio_map = None
+            mix_filters.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:normalize=0,alimiter,"
+                               f"apad,atrim=duration={total:.6f}[audioFinal]")
+        audio_cmd = ["ffmpeg", "-y", "-v", "error", *mix_inputs, "-filter_complex", ";".join(mix_filters),
+                     "-map", "[audioFinal]", "-c:a", "aac", "-b:a", "192k", str(mixed)]
+        audio_result = run(audio_cmd)
+        if audio_result.returncode != 0 or not mixed.exists() or not probe(mixed).get("hasAudio"):
+            raise RuntimeError(f"audio mix failed: {audio_result.stderr.strip()[-700:]}")
+        audio_index = add_input(mixed)
+        audio_map = f"{audio_index}:a:0"
 
     # Target output duration = the last active timeline element, rounded UP to
     # a whole frame so a clip on any visible lane can never be chopped.

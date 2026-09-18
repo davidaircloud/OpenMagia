@@ -50,7 +50,7 @@ Build up to 24 scenes with shared direction, cast, visual and audio references, 
 
 ### A real editor — because generation is only the first cut
 
-Trim, split, freeze, layer, detach audio, and arrange clips on a multi-track timeline. Refine transforms, speed, opacity, color, transitions, blur, masks, and animation from a compact inspector. Preview the result, then export the complete timeline as a single MP4.
+Trim, split, freeze, layer, detach audio, and arrange clips on a multi-track timeline. Refine transforms, speed, opacity, color, transitions, blur, masks, and animation from a compact inspector. Preview the result, then export video timelines as MP4 or audio-only timelines as MP3.
 
 <table>
   <tr>
@@ -74,6 +74,7 @@ Trim, split, freeze, layer, detach audio, and arrange clips on a multi-track tim
 - **Edit non-destructively** with clip-level transforms, color, masks, effects, transitions, overlays, and audio controls.
 - **Export honestly** through FFmpeg using the same layout and transition intent shown by the preview.
 - **Compose songs, not just clips** with YuE 2: a style description and your lyrics become a finished stereo song on the audio track. Its planned ABC score is saved beside the audio for inspection or an external score-editing workflow.
+- **Perform live** with a persistent Loop toggle and clean program output for OBS window and browser-audio capture. [Setup guide](docs/LIVE_PERFORMANCE.md).
 - **Extend locally** with permissioned plugins and reusable prompt skills.
 
 ## Install

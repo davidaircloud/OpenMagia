@@ -856,7 +856,7 @@ def sanitize_music_refined_style(value):
 def music_vocal_intent(idea):
     """Read explicit vocal wording, giving a requested vocal priority over 'instrumental'."""
     text = str(idea or "")
-    negative_pattern = r"\b(?:no (?:lead )?vocals?|without vocals?|no singing|instrumental only|vocal timbre\s*:\s*none|vocals?\s*:\s*none)\b"
+    negative_pattern = r"\b(?:no (?:lead )?vocals?|without vocals?|no singing|no sung words?|instrumental only|vocal timbre\s*:\s*none|vocals?\s*:\s*none)\b"
     negative = bool(re.search(negative_pattern, text, re.I))
     positive_text = re.sub(negative_pattern, "", text, flags=re.I)
     positive = bool(re.search(r"\b(?:some |with |warm |soft |male |female )?(?:lead )?vocals?\b|\b(?:sung|singing|vocalist)\b", positive_text, re.I))
@@ -1402,14 +1402,19 @@ def install_model_component(component, update=False):
 def push_timeline_undo(project):
     slug = project.get("slug") or active_slug()
     stack = undo_stacks.setdefault(slug, [])
-    stack.append(json.loads(json.dumps(project.get("tracks", []))))
+    stack.append(json.loads(json.dumps({"tracks": project.get("tracks", []), "timelineMagia": project.get("timelineMagia")})))
     del stack[:-50]
 
 def undo_timeline(project):
     stack = undo_stacks.get(project.get("slug") or active_slug(), [])
     if not stack:
         return False
-    project["tracks"] = stack.pop()
+    snapshot = stack.pop()
+    project["tracks"] = snapshot["tracks"]
+    if snapshot.get("timelineMagia") is None:
+        project.pop("timelineMagia", None)
+    else:
+        project["timelineMagia"] = snapshot["timelineMagia"]
     save_project(project)
     return True
 
@@ -2412,6 +2417,7 @@ def clamp_music_params(params):
     out["lyrics"] = str((params or {}).get("lyrics") or "")[:yue_prompts.MAX_LYRICS_CHARS]
     out["abc"] = str((params or {}).get("abc") or "")[:yue_prompts.MAX_ABC_CHARS]
     out["instrumental"] = bool((params or {}).get("instrumental"))
+    out["min_duration_seconds"] = max(0, min(360, float((params or {}).get("min_duration_seconds") or 0)))
     try:
         out["seed"] = max(0, min(2 ** 31 - 1, int((params or {}).get("seed", 42))))
     except (TypeError, ValueError):
@@ -3757,19 +3763,19 @@ timeline_magia_direction_cache = {}
 TIMELINE_MAGIA_RECIPES = {
     "subtle": {"name": "Subtle continuity", "direction": "minimal gentle continuity polish",
                "intensity": .58, "transitions": ["dissolve", "fade"], "trim": .55,
-               "motion": .55, "overlay_count": 0, "audio_fade": .12},
+               "motion": .55, "overlay_count": 0, "audio_fade": .45},
     "narrative": {"name": "Clean narrative", "direction": "purposeful narrative rhythm, restrained motion, natural color",
                    "intensity": .82, "transitions": ["dissolve", "fade", "wipe"], "trim": .85,
-                   "motion": .72, "overlay_count": 1, "audio_fade": .16},
+                   "motion": .72, "overlay_count": 1, "audio_fade": .55},
     "social": {"name": "Social energy", "direction": "fast energetic punchy social edit",
                 "intensity": 1.22, "transitions": ["slide", "wipe", "dissolve"], "trim": 1.35,
-                "motion": 1.25, "overlay_count": 2, "audio_fade": .09},
+                "motion": 1.25, "overlay_count": 2, "audio_fade": .35},
     "cinematic": {"name": "Cinematic restraint", "direction": "cinematic moody high contrast restrained edit",
                    "intensity": .74, "transitions": ["fade", "dissolve"], "trim": .65,
-                   "motion": .62, "overlay_count": 1, "audio_fade": .22},
+                   "motion": .62, "overlay_count": 1, "audio_fade": .75},
     "audio-first": {"name": "Audio-first clarity", "direction": "clear dialogue gentle pacing minimal visual effects",
                      "intensity": .62, "transitions": ["dissolve"], "trim": .45,
-                     "motion": .4, "overlay_count": 0, "audio_fade": .28},
+                     "motion": .4, "overlay_count": 0, "audio_fade": .65},
 }
 
 
@@ -3783,8 +3789,8 @@ TIMELINE_MAGIA_LOOKS = {
     "audio-first": {"contrast": 1.0, "saturation": 1.0, "exposure": 0, "temperature": 0},
 }
 TIMELINE_MAGIA_TRANSITION_SECONDS = {
-    "subtle": (.24, .40), "narrative": (.40, .62), "social": (.18, .32),
-    "cinematic": (.80, 1.15), "audio-first": (.30, .48),
+    "subtle": (.45, .70), "narrative": (.60, .90), "social": (.30, .50),
+    "cinematic": (1.0, 1.40), "audio-first": (.45, .70),
 }
 
 
@@ -3841,7 +3847,7 @@ def interpret_timeline_magia_direction(direction, use_ai=False):
 
 
 MAGIA_CATEGORY_KEYS = {"transitions": ("transition",),
-                     "transforms": ("zoom", "position", "motion", "keyframes"),
+                     "transforms": ("zoom", "position", "motion", "keyframes", "transformLayers"),
                      "color": ("color",), "pacing": ("start", "out"),
                      "overlays": ("zoom", "position", "mask"), "audio": ("audioFade",),
                      "audio_cleanup": ("audioProcessing",), "loudness": ("audioProcessing",)}
@@ -3872,6 +3878,36 @@ def restore_magia_effects(clip, categories=None):
     return bool(chosen)
 
 
+def compound_magia_fields(clip, fields):
+    """Append independent motion lanes and preserve the clip's existing effects."""
+    if "keyframes" in fields:
+        keyframes = fields.pop("keyframes")
+        for key in ("zoom", "position", "motion"):
+            fields.pop(key, None)
+        layers = json.loads(json.dumps(clip.get("transformLayers") or []))
+        layer_id = "magia-transform-" + uuid.uuid4().hex[:12]
+        for index, point in enumerate(keyframes.get("points") or []):
+            point["id"] = f"{layer_id}-point-{index}"
+        layers.append({"id": layer_id, "name": "Transform " + str(len(layers) + 2), "keyframes": keyframes})
+        fields["transformLayers"] = layers
+    old = clip.get("color") or {}
+    if "color" in fields and old.get("enabled", True):
+        color = fields["color"]
+        for key in ("exposure", "temperature", "tint", "highlights", "shadows"):
+            limit = 2 if key == "exposure" else 1
+            color[key] = round(max(-limit, min(limit, float(old.get(key, 0)) + float(color.get(key, 0)))), 4)
+        for key in ("contrast", "saturation"):
+            color[key] = round(max(0, min(2, float(old.get(key, 1)) * float(color.get(key, 1)))), 4)
+    if "audioProcessing" in fields:
+        fields["audioProcessing"] = {**(clip.get("audioProcessing") or {}), **fields["audioProcessing"]}
+    if "audioFade" in fields:
+        fields["audioFade"] = {edge: max(float((clip.get("audioFade") or {}).get(edge, 0)), value)
+                               for edge, value in fields["audioFade"].items()}
+    if "transition" in fields:
+        unique = {item.get("id"): item for item in fields["transition"]["items"]}
+        fields["transition"]["items"] = list(unique.values())
+
+
 def timeline_magia_plan(project, request=None):
     """Build an editable, export-safe effect plan from existing Inspector fields."""
     request = request or {}
@@ -3879,11 +3915,11 @@ def timeline_magia_plan(project, request=None):
     selected_id = str(request.get("selected_clip_id") or "")
     if request.get("scope") == "selected" and not any(
             clip.get("id") == selected_id for track in project.get("tracks", [])
-            if track.get("kind") == "video" for clip in track.get("clips", [])):
-        raise ValueError("Select a video clip before applying to a selected clip")
+            if track.get("kind") in ("video", "audio") for clip in track.get("clips", [])):
+        raise ValueError("Select a timeline clip before applying to a selected clip")
     for track in project.get("tracks", []):
         for clip in track.get("clips", []):
-            if request.get("scope") != "selected" or clip.get("id") == selected_id:
+            if request.get("mode") != "stack" and (request.get("scope") != "selected" or clip.get("id") == selected_id):
                 restore_magia_effects(clip)
     options = {"transitions": True, "transforms": True, "color": True,
                "pacing": True, "overlays": True, "audio": True,
@@ -3960,7 +3996,7 @@ def timeline_magia_plan(project, request=None):
         if options.get("transitions", True):
             transition_items = []
             if is_overlay:
-                fade = round(min(duration * .22, (.24 + (token % 24) / 100.0) * intensity), 3)
+                fade = round(min(duration * .22, (.62 + (token % 24) / 100.0) * max(.8, intensity)), 3)
                 transition_items = [
                     {"id": f"magia-in-{seed}-{clip_id}", "type": "fade", "edge": "start", "dur": fade, "enabled": True},
                     {"id": f"magia-out-{seed}-{clip_id}", "type": "fade", "edge": "end", "dur": fade, "enabled": True}]
@@ -3968,24 +4004,32 @@ def timeline_magia_plan(project, request=None):
                 kind, duration_value = transition_recipe(clip)
                 transition_items = [{"id": f"magia-{seed}-{clip_id}", "type": kind, "edge": "start",
                                      "dur": duration_value, "enabled": True}]
+            else:
+                transition_items = [{"id": f"magia-in-{seed}-{clip_id}", "type": "fade", "edge": "start",
+                                     "dur": round(min(.8 * max(.8, intensity), duration * .2), 3), "enabled": True}]
             if transition_items:
                 previous = clip.get("transition") or {}
                 manual_items = previous.get("items")
                 if not isinstance(manual_items, list):
                     manual_items = [{**previous, "id": previous.get("id") or f"tr-legacy-{clip_id}"}] if previous.get("type") not in (None, "cut") else []
-                fields["transition"] = {"items": manual_items + transition_items}
-                labels.append(" + ".join(f"{item['type']} {item['dur']:.2f}s" for item in transition_items))
-                counts["transitions"] += len(transition_items)
+                if request.get("mode", "stack") == "stack":
+                    occupied = {item.get("edge", "start") for item in manual_items if item.get("enabled", True) and item.get("type") != "cut"}
+                    transition_items = [item for item in transition_items if item.get("edge", "start") not in occupied]
+                if transition_items:
+                    fields["transition"] = {"items": manual_items + transition_items}
+                    labels.append(" + ".join(f"{item['type']} {item['dur']:.2f}s" for item in transition_items))
+                    counts["transitions"] += len(transition_items)
         if is_overlay and options.get("overlays", True):
-            corners = [(-27, -24), (27, -24), (-27, 24), (27, 24)]
-            x, y = corners[token % len(corners)]
-            fields.update(zoom=round((.68 + (token % 19) / 100.0) * min(1.0, intensity), 3),
-                          position={"x": x, "y": y},
-                          mask={"enabled": True, "type": "rectangle", "x": 50, "y": 50,
-                                "width": 92, "height": 92, "invert": False})
-            labels.append("overlay layout")
+            if "transition" not in fields:
+                fade = round(min(.6, duration * .22), 3)
+                fields["transition"] = {"items": [
+                    {"id": f"magia-overlay-in-{seed}-{clip_id}", "type": "fade", "edge": "start", "dur": fade, "enabled": True},
+                    {"id": f"magia-overlay-out-{seed}-{clip_id}", "type": "fade", "edge": "end", "dur": fade, "enabled": True}]}
+                labels.append(f"overlay fades {fade:.2f}s")
+            else:
+                labels.append("overlay edge treatment")
             counts["overlays"] += 1
-        elif options.get("transforms", True):
+        if options.get("transforms", True):
             index = base_index.get(clip_id, 0)
             incoming = transition_recipe(clip)[1] / duration if index > 0 else 0
             outgoing = transition_recipe(base_order[index + 1])[1] / duration if index < len(base_order) - 1 else 0
@@ -4045,8 +4089,8 @@ def timeline_magia_plan(project, request=None):
             categories = []
             if "transition" in fields: categories.append("transitions")
             if clip_id in retimed: categories.append("pacing")
-            if is_overlay and any(key in fields for key in ("zoom", "position", "mask")): categories.append("overlays")
-            elif any(key in fields for key in ("zoom", "position", "motion", "keyframes")): categories.append("transforms")
+            if is_overlay and options.get("overlays", True): categories.append("overlays")
+            if any(key in fields for key in ("zoom", "position", "motion", "keyframes", "transformLayers")): categories.append("transforms")
             if "color" in fields: categories.append("color")
             if "audioFade" in fields: categories.append("audio")
             if "audioProcessing" in fields:
@@ -4056,20 +4100,47 @@ def timeline_magia_plan(project, request=None):
                             "name": item.get("name") or clip_id, "fields": fields,
                             "categories": categories, "changes": labels})
             counts["clips"] += 1
+    # Audio lanes participate independently of picture treatments.
+    for track in tracks:
+        if track.get("kind") != "audio":
+            continue
+        for clip in track.get("clips", []):
+            if scope == "selected" and clip.get("id") != selected_id:
+                continue
+            fields, categories, labels = {}, [], []
+            if options.get("audio"):
+                fade = round(min(float(recipe.get("audio_fade", .18)) * intensity, clip_duration(clip) * .1), 3)
+                fields["audioFade"] = {"in": fade, "out": fade}
+                categories.append("audio"); labels.append("audio edge fades"); counts["audio"] += 1
+            processing = {}
+            if options.get("audio_cleanup"):
+                processing.update(voice=True, denoise=True, compress=True)
+                categories.append("audio_cleanup"); labels.append("voice cleanup (export)"); counts["audio_cleanup"] += 1
+            if options.get("loudness"):
+                processing.update(loudness=True, target_lufs=-16.0, true_peak=-1.5)
+                categories.append("loudness"); labels.append("loudness normalization (export)"); counts["loudness"] += 1
+            if processing:
+                fields["audioProcessing"] = processing
+            if fields:
+                updates.append({"clip_id": clip["id"], "track_id": track["id"],
+                                "name": media.get(clip.get("mediaId"), {}).get("name") or clip["id"],
+                                "fields": fields, "categories": categories, "changes": labels})
+                counts["clips"] += 1
+    if request.get("mode") == "stack":
+        clips_by_id = {c["id"]: c for t in tracks for c in t.get("clips", [])}
+        for update in updates:
+            compound_magia_fields(clips_by_id[update["clip_id"]], update["fields"])
     existing_overlays = [(track, clip) for track, clip in targets if base and track.get("id") != base.get("id")]
     if scope == "timeline" and options.get("overlays", True) and base_order and not existing_overlays:
         overlay_track = next((track for track in video_tracks if track.get("id") == OVERLAY_TRACK), None)
         overlay_track_id = (overlay_track or {}).get("id") or OVERLAY_TRACK
         candidate_indexes = sorted(set((1, max(1, len(base_order) // 2), max(1, len(base_order) - 2))))
-        treatments = [
-            {"name": "split-screen preview", "zoom": 1.0, "position": {"x": 0, "y": 0},
-             "mask": {"enabled": True, "type": "split", "x": 50, "y": 50, "width": 100, "height": 100, "invert": False}},
-            {"name": "center echo", "zoom": .58, "position": {"x": 0, "y": 0},
-             "mask": {"enabled": True, "type": "ellipse", "x": 50, "y": 50, "width": 72, "height": 72, "invert": False}},
-            {"name": "cinematic window", "zoom": 1.0, "position": {"x": 0, "y": 0},
-             "mask": {"enabled": True, "type": "cinematic", "x": 50, "y": 50, "width": 100, "height": 38, "invert": False}},
-        ]
-        overlay_limit=int(recipe.get("overlay_count", len(candidate_indexes)))
+        treatments = [{"name": "full-frame cutaway", "zoom": 1.0, "position": {"x": 0, "y": 0},
+                       "mask": {"enabled": False, "type": "rectangle", "x": 50, "y": 50,
+                                "width": 100, "height": 100, "invert": False}}]
+        overlay_limit = int(recipe.get("overlay_count", len(candidate_indexes)))
+        if (request.get("options") or {}).get("overlays") and overlay_limit < 1:
+            overlay_limit = 1
         for overlay_index, source_index in enumerate(candidate_indexes[:overlay_limit]):
             if source_index >= len(base_order):
                 continue
@@ -4077,7 +4148,7 @@ def timeline_magia_plan(project, request=None):
             duration = min(1.1, max(.72, clip_duration(source) * .19))
             token = _timeline_magia_number(seed, f"overlay:{source.get('id')}")
             treatment = treatments[(token + overlay_index) % len(treatments)]
-            fade = round(min(.2, duration * .2), 3)
+            fade = round(min(.45, duration * .35), 3)
             overlay_id = f"magia-overlay-{seed}-{source.get('id')}"
             fields = {"id": overlay_id, "mediaId": source.get("mediaId"),
                       "start": round(max(0, float(source.get("start", 0)) - duration * .68), 6),
@@ -4104,24 +4175,25 @@ def timeline_magia_plan(project, request=None):
     return {"seed": seed, "profile": profile, "recipe_id": recipe_id,
             "direction": direction, "user_direction": user_direction,
             "direction_note": interpreted["note"], "scope": scope,
-            "selected_clip_id": selected_id,
+            "selected_clip_id": selected_id, "mode": "stack" if request.get("mode") == "stack" else "replace",
             "options": options, "updates": updates, "summary": counts, "used_ai": interpreted["used_ai"]}
 
 
 def apply_timeline_magia_plan(project, plan):
     by_id = {clip.get("id"): clip for track in project.get("tracks", []) for clip in track.get("clips", [])}
-    allowed = {"start", "in", "out", "zoom", "position", "motion", "keyframes", "color", "blur",
+    allowed = {"start", "in", "out", "zoom", "position", "motion", "keyframes", "transformLayers", "color", "blur",
                "mask", "audioFade", "audioProcessing", "volume", "transition", "muted"}
     category_keys = MAGIA_CATEGORY_KEYS
     options = plan.get("options") or {}
     scope = plan.get("scope") or "timeline"
     selected_id = str(plan.get("selected_clip_id") or "")
+    stacking = plan.get("mode") == "stack"
     applied = 0
     for track in project.get("tracks", []):
         # Generated overlays are wholly owned by Magia. Every apply replaces
         # them when enabled or removes them when the option is unchecked.
         before_count = len(track.get("clips", []))
-        if scope == "timeline" and track.get("id") == OVERLAY_TRACK:
+        if not stacking and scope == "timeline" and track.get("id") == OVERLAY_TRACK:
             track["clips"] = [clip for clip in track.get("clips", [])
                               if not (clip.get("magiaOverlay") is True and str(clip.get("id") or "").startswith("magia-overlay-"))]
         applied += before_count - len(track["clips"])
@@ -4141,7 +4213,7 @@ def apply_timeline_magia_plan(project, plan):
                 if "audioFade" in clip: provenance["audio"] = {}
             if provenance:
                 clip["magiaEffects"] = provenance
-            if restore_magia_effects(clip):
+            if not stacking and restore_magia_effects(clip):
                 applied += 1
     for update in plan.get("updates", []):
         create = update.get("create")
@@ -4151,6 +4223,8 @@ def apply_timeline_magia_plan(project, plan):
                 track = {"id": update.get("track_id") or next_track_id(project, "video"), "kind": "video",
                          "name": "Overlay", "muted": False, "clips": []}
                 project.setdefault("tracks", []).insert(0, track)
+            if any(c.get("id") == create.get("id") for c in track.get("clips", [])):
+                continue
             track.setdefault("clips", []).append(json.loads(json.dumps(create)))
             applied += 1
             continue
@@ -4168,10 +4242,11 @@ def apply_timeline_magia_plan(project, plan):
             if key in allowed:
                 clip[key] = value
         applied += 1
-    if scope == "timeline":
-        cleanup_timeline(project)
-    else:
-        repair_timeline_overlaps(project)
+    if options.get("pacing"):
+        if scope == "timeline":
+            cleanup_timeline(project)
+        else:
+            repair_timeline_overlaps(project)
     project["timelineMagia"] = {
         "recipe_id": plan.get("recipe_id") or "",
         "profile": plan.get("profile") or "",
@@ -4302,12 +4377,23 @@ def music_request_from_scene(scene):
             raise ValueError(f"'{skill_id}' is a {kinds[skill_id]} skill. YuE 2 takes a music skill "
                              "(Song director, Score underscore, Album identity) or none.")
     direction = compiled_music_direction(skill_id, scene.get("skill_customization")) if skill_id else ""
-    return yue_prompts.format_music_request(
-        idea=scene.get("prompt") or "", lyrics=params.get("lyrics") or "",
+    idea = scene.get("prompt") or ""
+    lyrics = params.get("lyrics") or ""
+    # Refined/imported projects can contain an explicit instrumental direction
+    # while predating (or losing) the UI boolean.  Do not reduce that to one
+    # bare [Instrumental] marker: YuE commonly treats it as an unbounded form.
+    # Sung words remain authoritative and prevent accidental vocal removal.
+    has_sung_words = bool(yue_prompts.lyric_lines(yue_prompts.normalize_lyrics(lyrics)))
+    inferred_instrumental = music_vocal_intent(idea) == "instrumental" and not has_sung_words
+    instrumental = bool(params.get("instrumental")) or inferred_instrumental
+    compiled = yue_prompts.format_music_request(
+        idea=idea, lyrics=lyrics,
         answers=params.get("answers") or {}, plan_mode=params.get("plan_mode") or "full",
         abc=params.get("abc") or "", seed=params.get("seed", 42), guidance=params.get("guidance"),
-        instrumental=bool(params.get("instrumental")), skill_direction=direction, skill_id=skill_id,
+        instrumental=instrumental, skill_direction=direction, skill_id=skill_id,
         song_id=scene.get("name") or scene["id"])
+    compiled["request"]["min_duration_seconds"] = float(params.get("min_duration_seconds") or 0)
+    return compiled
 
 
 def yue_worker_download(path, timeout=180.0):
@@ -4333,6 +4419,92 @@ def _music_scene_gone(slug, scene_id):
     return not any(s.get("id") == scene_id for s in latest.get("scenes", []))
 
 
+def _retryable_music_error(message):
+    text = str(message or "").lower()
+    return any(marker in text for marker in (
+        "truncated", "partial ending", "invalid score", "damaged ending",
+        "early ending", "planned arrangement", "almost silent", "became unstable",
+        "too short", "audio dropouts",
+    ))
+
+
+def _next_music_seed(seed, attempt):
+    """Deterministic, distinct seeds for transparent bounded retries."""
+    return (int(seed) + attempt * 104729) % (2 ** 31)
+
+
+def _run_music_worker_attempt(scene_id, project, compiled, attempt, attempts):
+    global progress
+    waiting_since = time.monotonic()
+    while True:
+        if _music_scene_gone(project["slug"], scene_id):
+            return None, None
+        try:
+            job = yue_worker_call("/v1/music", "POST", compiled["request"], timeout=30.0)
+            break
+        except ValueError as exc:
+            message = str(exc).lower()
+            if "409" not in message or "generating another song" not in message:
+                raise
+            if time.monotonic() - waiting_since > MUSIC_STALL_TIMEOUT:
+                raise TimeoutError("The music runtime stayed occupied by another song for too long.") from exc
+            progress[scene_id] = {"phase": "waiting for music worker", "completed": 0,
+                                  "total": 1, "engine": "yue2", "attempt": attempt,
+                                  "attempts": attempts}
+            time.sleep(MUSIC_POLL_SECONDS)
+    worker_id = str(job.get("id") or "")
+    progress[scene_id] = {"phase": "queued", "completed": 0, "total": 1, "engine": "yue2",
+                          "attempt": attempt, "attempts": attempts}
+    last_seen = time.monotonic()
+    last_phase = ""
+    last_step = None
+    while True:
+        if _music_scene_gone(project["slug"], scene_id):
+            try:
+                yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
+            except Exception:
+                pass
+            return None, None
+        try:
+            state = yue_worker_call("/v1/music/" + worker_id, timeout=30.0)
+        except ValueError as exc:
+            if "404" in str(exc):
+                raise ValueError("The music runtime lost the song before it finished.") from exc
+            raise
+        status = str(state.get("status") or "queued")
+        step = dict(state.get("progress") or {})
+        phase = str(step.get("phase") or "working")
+        marker = (status, phase, step.get("completed"), step.get("total"))
+        if marker != last_step:
+            last_seen = time.monotonic()
+            last_step = marker
+        if phase != last_phase:
+            last_phase = phase
+            audit = compiled["audit"]
+            with lock:
+                latest = load_project_slug(project["slug"])
+                live = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
+                if live is not None:
+                    live["music"] = {"job": worker_id, "phase": phase, "attempt": attempt,
+                                     "attempts": attempts, "plan_mode": audit["plan_mode"],
+                                     "estimated_seconds": audit["estimated_seconds"]}
+                    save_project(latest)
+        progress[scene_id] = {"phase": phase.lower(), "completed": step.get("completed") or 0,
+                              "total": step.get("total") or 0, "engine": "yue2",
+                              "attempt": attempt, "attempts": attempts}
+        if status == "ready":
+            return worker_id, state
+        if status in ("error", "cancelled"):
+            raise ValueError(str(state.get("error") or "The music runtime stopped this song."))
+        if time.monotonic() - last_seen > MUSIC_STALL_TIMEOUT:
+            try:
+                yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
+            except Exception:
+                pass
+            raise TimeoutError(f"The music runtime reported nothing for {MUSIC_STALL_TIMEOUT} seconds.")
+        time.sleep(MUSIC_POLL_SECONDS)
+
+
 def run_music_job(scene_id, project):
     """Run one song through the music runtime and place it on the audio track.
 
@@ -4347,65 +4519,25 @@ def run_music_job(scene_id, project):
         return
     try:
         compiled = music_request_from_scene(scene)
-        job = yue_worker_call("/v1/music", "POST", compiled["request"], timeout=30.0)
-    except Exception as exc:
-        with lock:
-            latest = load_project_slug(project["slug"])
-            failed = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
-            pending = next((x for x in latest.get("media", []) if x.get("scene_id") == scene_id), None)
-            if failed:
-                failed["status"] = "error"; failed["error"] = str(exc)
-            if pending:
-                pending["status"] = "error"; pending["error"] = str(exc)
-            save_project(latest)
-        progress.pop(scene_id, None)
-        return
-    worker_id = str(job.get("id") or "")
-    progress[scene_id] = {"phase": "queued", "completed": 0, "total": 1, "engine": "yue2"}
-    last_seen = time.monotonic()
-    last_phase = ""
-    try:
-        while True:
-            if _music_scene_gone(project["slug"], scene_id):
-                try:
-                    yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
-                except Exception:
-                    pass
-                return
+        attempts = max(1, int(os.environ.get("OPENMAGIA_MUSIC_ATTEMPTS", "3")))
+        base_seed = int(compiled["request"].get("seed") or 42)
+        worker_id, state = None, None
+        for attempt in range(1, attempts + 1):
+            compiled["request"]["seed"] = _next_music_seed(base_seed, attempt - 1)
             try:
-                state = yue_worker_call("/v1/music/" + worker_id, timeout=30.0)
-            except ValueError as exc:
-                if "404" in str(exc):
-                    raise ValueError("The music runtime lost the song before it finished.") from exc
-                raise
-            last_seen = time.monotonic()
-            status = str(state.get("status") or "queued")
-            step = dict(state.get("progress") or {})
-            phase = str(step.get("phase") or "working")
-            if phase != last_phase:
-                last_phase = phase
-                audit = compiled["audit"]
-                with lock:
-                    latest = load_project_slug(project["slug"])
-                    live = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
-                    if live is not None:
-                        live["music"] = {"job": worker_id, "phase": phase,
-                                         "plan_mode": audit["plan_mode"],
-                                         "estimated_seconds": audit["estimated_seconds"]}
-                        save_project(latest)
-            progress[scene_id] = {"phase": phase.lower(), "completed": step.get("completed") or 0,
-                                  "total": step.get("total") or 0, "engine": "yue2"}
-            if status == "ready":
+                worker_id, state = _run_music_worker_attempt(
+                    scene_id, project, compiled, attempt, attempts)
+                if state is None:
+                    return
                 break
-            if status in ("error", "cancelled"):
-                raise ValueError(str(state.get("error") or "The music runtime stopped this song."))
-            if time.monotonic() - last_seen > MUSIC_STALL_TIMEOUT:
-                try:
-                    yue_worker_call("/v1/music/" + worker_id, "DELETE", timeout=20.0)
-                except Exception:
-                    pass
-                raise TimeoutError(f"The music runtime reported nothing for {MUSIC_STALL_TIMEOUT} seconds.")
-            time.sleep(MUSIC_POLL_SECONDS)
+            except ValueError as exc:
+                if attempt >= attempts or not _retryable_music_error(exc):
+                    raise
+                progress[scene_id] = {"phase": "retrying variation", "completed": attempt,
+                                      "total": attempts, "engine": "yue2",
+                                      "attempt": attempt + 1, "attempts": attempts}
+        if not worker_id or state is None:
+            raise ValueError("YuE 2 did not produce a complete variation.")
         result = dict(state.get("result") or {})
         audio = yue_worker_download("/v1/music/" + worker_id + "/audio")
         if not audio:
@@ -4477,7 +4609,11 @@ def run_music_job(scene_id, project):
             save_project(latest)
     finally:
         progress.pop(scene_id, None)
-        pump_queue(load_project_slug(project["slug"]))
+        with job_lock:
+            global active_job
+            if active_job == scene_id:
+                active_job = None
+            pump_queue(load_project_slug(project["slug"]))
 
 
 def run_job(scene_id, project):
@@ -5229,6 +5365,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if p == "/Preview":
+            return self._serve_file(ROOT / "program-output.html", "text/html; charset=utf-8")
         if p.startswith("/media/") or p.startswith("/uploads/"):
             # media lives inside the active project folder
             base = proj_dir(load_project()["slug"]).resolve()
@@ -5240,7 +5378,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._serve_file(f, self._ctype(f.suffix.lower()))
         if p == "/api/plugins":
-            return self._json({"plugins": plugin_registry.list(), "store": {"status": "coming-soon"}})
+            return self._json({"plugins": plugin_registry.list(), "store": {"status": "coming-soon"}, "bundled": [{"name": "OBS Output", "path": str(ROOT / "plugins" / "obs-output")}]})
         if p == "/api/plugins/logs":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._json({"logs": plugin_registry.logs((qs.get("pluginId") or [None])[0], (qs.get("limit") or [200])[0])})
@@ -6183,6 +6321,7 @@ class Handler(BaseHTTPRequestHandler):
                     "position": b.get("position", {"x": 0, "y": 0}),
                     "motion": b.get("motion"),
                     "keyframes": b.get("keyframes"),
+                    "transformLayers": b.get("transformLayers", []),
                     "color": b.get("color"),
                     "blur": b.get("blur"),
                     "mask": b.get("mask"),
@@ -6378,6 +6517,8 @@ class Handler(BaseHTTPRequestHandler):
                                 c[k] = b[k]
                         if "motion" in b:
                             c["motion"] = b["motion"]
+                        if "transformLayers" in b:
+                            c["transformLayers"] = b["transformLayers"]
                         if "keyframes" in b:
                             c["keyframes"] = b["keyframes"]
                         if "color" in b:

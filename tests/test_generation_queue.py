@@ -7,6 +7,22 @@ import server
 
 
 class GenerationQueueTests(unittest.TestCase):
+    def test_music_completion_releases_slot_before_pumping_next_song(self):
+        project = {"slug": "test", "scenes": [{"id": "song", "status": "running"}], "media": []}
+        previous = server.active_job
+        try:
+            server.active_job = "song"
+            with mock.patch.object(server, "music_request_from_scene", side_effect=ValueError("bad request")), \
+                 mock.patch.object(server, "load_project_slug", return_value=project), \
+                 mock.patch.object(server, "save_project"), \
+                 mock.patch.object(server, "pump_queue") as pump:
+                pump.side_effect = lambda project: self.assertIsNone(server.active_job)
+                server.run_music_job("song", project)
+            pump.assert_called_once()
+            self.assertEqual("error", project["scenes"][0]["status"])
+        finally:
+            server.active_job = previous
+
     def test_completed_character_sheet_is_saved_to_cast_automatically(self):
         sheet = {"id": "sheet-1", "name": "Serina", "identity": "short dark hair",
                  "recipe": "turn-6", "style": "match", "status": "ready",

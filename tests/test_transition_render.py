@@ -92,3 +92,28 @@ class TransitionRenderTests(unittest.TestCase):
                     else:
                         self.assertGreater(pixel(10 if at == .5 else 150)[0], 240)
                         self.assertGreater(pixel(150 if at == .5 else 10)[2], 240)
+
+
+    def test_transform_layers_compound_with_fade_in_export(self):
+        project = self.project('fade')
+        clip = project['tracks'][0]['clips'][0]
+        project['tracks'][0]['clips'] = [clip]
+        def fixed(zoom):
+            return {'points': [{'at': 0, 'zoom': zoom, 'x': .5, 'y': .5},
+                               {'at': 1, 'zoom': zoom, 'x': .5, 'y': .5}]}
+        clip['keyframes'] = fixed(1.1)
+        clip['transformLayers'] = [{'id': 'second', 'keyframes': fixed(1.2)}]
+        clip['transition'] = {'items': [{'id': 'fade', 'edge': 'start', 'type': 'fade', 'dur': 1}]}
+        stacked_path = self.render(project)
+        stacked_early = self.frame(stacked_path, .5)
+        stacked_late = self.frame(stacked_path, 1.5)
+        self.assertAlmostEqual(stacked_early(80)[0], 127, delta=12)
+        self.assertGreater(stacked_late(80)[0], 240)
+        # A stack of two zooms must match their product, including the white stripe.
+        clip['transformLayers'] = []
+        clip['keyframes'] = fixed(1.32)
+        flat_path = self.render(project)
+        flattened = self.frame(flat_path, 1.5)
+        for x in range(160):
+            for a, b in zip(stacked_late(x), flattened(x)):
+                self.assertAlmostEqual(a, b, delta=5)

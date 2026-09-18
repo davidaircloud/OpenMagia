@@ -57,9 +57,20 @@ def classify_audio_quality(window_rms, peak, rms, clipped_fraction):
     baseline = early[len(early) // 2]
     loudest = max(values)
     ratio = loudest / max(baseline, 1e-6)
+    # Decoder collapse can also appear as repeated near-silent holes between
+    # full-volume bursts (rather than clipping).  Ignore three 2-second windows
+    # at each edge so a deliberate intro/outro is never mistaken for damage.
+    core = values[3:-3] if len(values) > 12 else values
+    active_level = sorted(core)[max(0, int(len(core) * .75) - 1)] if core else loudest
+    dropout_floor = max(0.003, active_level * 0.05)
+    dropout_flags = [value < dropout_floor for value in core]
+    dropout_fraction = (sum(dropout_flags) / len(dropout_flags)) if dropout_flags else 0.0
+    dropout_transitions = sum(a != b for a, b in zip(dropout_flags, dropout_flags[1:]))
     metrics = {"peak": round(float(peak), 6), "rms": round(float(rms), 6),
                "clipped_fraction": round(float(clipped_fraction), 6),
-               "loudest_window_rms": round(loudest, 6), "loudness_jump": round(ratio, 2)}
+               "loudest_window_rms": round(loudest, 6), "loudness_jump": round(ratio, 2),
+               "dropout_fraction": round(dropout_fraction, 4),
+               "dropout_transitions": dropout_transitions}
     if float(rms) < 0.002:
         return {**metrics, "accepted": False,
                 "reason": "YuE produced an almost silent candidate."}
@@ -69,6 +80,10 @@ def classify_audio_quality(window_rms, peak, rms, clipped_fraction):
     if float(clipped_fraction) >= 0.001 and loudest >= 0.45 and ratio >= 4.0:
         return {**metrics, "accepted": False,
                 "reason": ("YuE's decoded candidate became unstable and clipped after starting normally. "
+                           "Generate another variation with a different seed.")}
+    if dropout_fraction >= 0.10 and dropout_transitions >= 4:
+        return {**metrics, "accepted": False,
+                "reason": ("YuE's decoded candidate contains repeated internal audio dropouts. "
                            "Generate another variation with a different seed.")}
     return {**metrics, "accepted": True, "reason": ""}
 
@@ -110,7 +125,38 @@ def inspect_abc_score(path, yue_root):
         return {"accepted": False,
                 "reason": ("YuE produced an invalid score, so this candidate was discarded before "
                            f"it could be published with a damaged ending: {detail}")}
-    return {"accepted": True, "reason": ""}
+    report = {}
+    try:
+        report = json.loads(checked.stdout or "{}")
+    except (TypeError, ValueError):
+        pass
+    duration = report.get("nominal_duration_seconds") if isinstance(report, dict) else None
+    return {"accepted": True, "reason": "",
+            "nominal_duration_seconds": float(duration) if duration is not None else None}
+
+
+def check_planned_audio_coverage(score_check, audio_seconds, minimum_ratio=0.80):
+    """Reject audio that ends substantially before its accepted score does.
+
+    YuE can emit both end tokens and therefore report an untruncated run even
+    when semantic generation covers only the first part of the ABC plan.  The
+    score inspector's clock gives us an independent completion check.
+    """
+    planned = (score_check or {}).get("nominal_duration_seconds")
+    try:
+        planned, actual = float(planned), float(audio_seconds)
+    except (TypeError, ValueError):
+        return {"accepted": True, "reason": "coverage analysis unavailable"}
+    if planned <= 0 or actual <= 0:
+        return {"accepted": True, "reason": "coverage analysis unavailable"}
+    ratio = actual / planned
+    metrics = {"planned_seconds": round(planned, 3), "audio_seconds": round(actual, 3),
+               "coverage_ratio": round(ratio, 3)}
+    if ratio < minimum_ratio:
+        return {**metrics, "accepted": False,
+                "reason": (f"YuE rendered only {actual:.1f}s of a {planned:.1f}s planned arrangement. "
+                           "The early ending was discarded; retry to generate a complete variation.")}
+    return {**metrics, "accepted": True, "reason": ""}
 
 try:
     from yue_prompts import parse_yue_progress   # one progress parser, one truth
@@ -175,6 +221,9 @@ class Worker:
         """How to launch the runtime: an explicit command, or the installed ``yue2`` CLI."""
         if self.args.command:
             return shlex.split(self.args.command)
+        checked_entry = Path(__file__).with_name("yue_generate.py")
+        if checked_entry.is_file():
+            return [sys.executable, str(checked_entry)]
         if self.args.yue_cli:
             return [str(self.args.yue_cli)]
         beside = Path(sys.executable).parent / "yue2"   # installed into this environment
@@ -293,15 +342,21 @@ class Worker:
                 detail = ""
                 if failure.exists():
                     try:
-                        detail = str(json.loads(failure.read_text()).get("message") or "")
+                        report = json.loads(failure.read_text())
+                        detail = str(report.get("reason") or report.get("message") or "")
                     except (OSError, ValueError):
                         detail = ""
                 song.status = "error"
                 if detail:
                     song.error = detail
                 elif code < 0:
-                    song.error = (f"YuE 2 was terminated by signal {-code} before the song completed. "
-                                  "Retry with a different seed or a more explicit section structure.")
+                    if code == -signal.SIGKILL:
+                        song.error = ("YuE 2 was killed by the operating system before the song completed. "
+                                      "On Apple Silicon this usually means unified-memory pressure; stop "
+                                      "other model training or inference (for example Unsloth) and retry.")
+                    else:
+                        song.error = (f"YuE 2 was terminated by signal {-code} before the song completed. "
+                                      "Retry with a different seed or a more explicit section structure.")
                 else:
                     song.error = (f"YuE 2 exited with code {code} before the song completed. "
                                   "The worker log retains the technical output for diagnosis.")
@@ -336,17 +391,60 @@ class Worker:
                               "Retry to generate a complete variation.")
                 self.note(f"rejected {song.id}: truncated output")
                 return
-            # YuE's editing contract requires every generated score to pass its
-            # native-dialect inspector before reuse. This also catches malformed
-            # plans that can decode into a plausible opening and a broken ending.
+            requested_minimum = max(0.0, float(song.request.get("min_duration_seconds") or 0))
+            actual_seconds = float(song.result.get("seconds") or 0)
+            if requested_minimum and actual_seconds + 0.05 < requested_minimum:
+                song.status = "error"
+                song.error = (f"YuE candidate too short: {actual_seconds:.1f}s; "
+                              f"this song requires at least {requested_minimum:.1f}s.")
+                self.note(f"rejected {song.id}: {song.error}")
+                return
+            # Score inspection has two very different meanings depending on where
+            # the score came from. When the user supplied or edited the ABC, that
+            # score is the contract for the song, so an invalid score stays a hard
+            # failure. When YuE wrote the plan itself (Full/Melody), the symbolic
+            # score is only a by-product: an imperfect plan can still decode into a
+            # clean, complete recording, so a failed inspection is surfaced as a
+            # review warning instead of throwing away usable audio. The runtime
+            # truncation receipt (above) and the decoded-audio checks (below) still
+            # decide whether the take is publishable, so nothing silent or clipped
+            # slips through behind a downgraded score.
             if score.exists() and str(song.request.get("cot") or "full") != "off":
                 score_check = inspect_abc_score(score, self.args.cwd)
                 song.result["score_check"] = score_check
+                supplied_score = bool(str(song.request.get("abc") or "").strip())
                 if not score_check.get("accepted"):
-                    song.status = "error"
-                    song.error = score_check["reason"]
-                    self.note(f"rejected {song.id}: {song.error}")
-                    return
+                    if supplied_score:
+                        # Supplied or edited ABC keeps strict validation.
+                        song.status = "error"
+                        song.error = score_check["reason"]
+                        self.note(f"rejected {song.id}: {song.error}")
+                        return
+                    # Generated plan that the native inspector rejects: keep the
+                    # audio, but record the caveat so the editor can review the score.
+                    song.result["score_review"] = {
+                        "accepted": False, "warning": True, "needs_review": True,
+                        "reason": score_check.get("reason")
+                        or "YuE's generated score did not pass the native inspector; "
+                           "the score may not open cleanly in the editor.",
+                    }
+                    # YuE's own status vocabulary is complete / needs_review / failed.
+                    # A generated plan whose symbolic score is imperfect but whose
+                    # audio is complete stays deliverable, flagged for review.
+                    song.result["needs_review"] = True
+                    self.note(f"review warning {song.id}: generated score not clean "
+                              "(audio kept pending truncation and audio checks)")
+                else:
+                    # A clean score still gives an independent completion clock, so a
+                    # run that emitted end tokens but only rendered part of the plan
+                    # stays a hard truncation failure.
+                    coverage = check_planned_audio_coverage(score_check, song.result.get("seconds"))
+                    song.result["coverage"] = coverage
+                    if not coverage.get("accepted"):
+                        song.status = "error"
+                        song.error = coverage["reason"]
+                        self.note(f"rejected {song.id}: {song.error}")
+                        return
             quality = analyze_audio_quality(audio)
             song.result["quality"] = quality
             if not quality.get("accepted", True):
@@ -543,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
         lyrics = str(body.get("lyrics") or "")
         if not style or not lyrics.strip():
             return self._send(400, {"error": "A music request needs style (or tags) and lyrics."})
-        request = {k: body[k] for k in ("id", "style", "tags", "lyrics", "cot", "abc", "seed", "cfg_scale") if k in body}
+        request = {k: body[k] for k in ("id", "style", "tags", "lyrics", "cot", "abc", "seed", "cfg_scale", "min_duration_seconds") if k in body}
         song = Song(request, self.worker.args.workdir / time.strftime("%Y%m%d") / (str(body.get("id") or "song")[:48] + "-" + uuid.uuid4().hex[:6]))
         song.workdir.mkdir(parents=True, exist_ok=True)
         if not self.worker.enqueue(song):

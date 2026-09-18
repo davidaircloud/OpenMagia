@@ -206,7 +206,9 @@ def compile_style_tags(*, style="", answers=None, skill_direction="", instrument
     and a seeded comparison stays meaningful.
     """
     answers = answers or {}
-    fragments = []
+    # YuE has no instrumental boolean. This phrase is the effective control, so
+    # it must precede long user prose and survive MAX_STYLE_CHARS truncation.
+    fragments = [INSTRUMENTAL_STYLE_TAG] if instrumental else []
     for field in ("language", "genre", "tempo", "mood", "instruments", "voice", "structure"):
         value = clean_text(answers.get(field))
         if value:
@@ -219,8 +221,6 @@ def compile_style_tags(*, style="", answers=None, skill_direction="", instrument
     direction = clean_text(skill_direction)
     if direction:
         fragments.append(direction)
-    if instrumental and INSTRUMENTAL_STYLE_TAG not in fragments:
-        fragments.append(INSTRUMENTAL_STYLE_TAG)
     # Keep the distinctive direction first: a long idea must not crowd it out.
     out, total = [], 0
     for fragment in fragments:
@@ -281,7 +281,8 @@ def format_music_request(*, idea="", lyrics="", answers=None, plan_mode="full", 
         idea_text = ", ".join([part for part in [idea_text] + kept_out if part])
     # Sung words and "no lead vocal" are contradictory guidance; words win.
     instrumental = bool(instrumental) and not lyric_lines(clean_lyrics)
-    if instrumental and not lyric_sections(clean_lyrics):
+    bare_instrumental = clean_lyrics.strip().casefold() in {"[instrumental]", "[inst]"}
+    if instrumental and (not lyric_sections(clean_lyrics) or bare_instrumental):
         # YuE2 has no instrumental argument. A section tag is the only shape it
         # accepts for "no vocals"; see INSTRUMENTAL_LYRICS for how much structure
         # an endless cue costs, and yue_worker.py --max-tokens for the guard.

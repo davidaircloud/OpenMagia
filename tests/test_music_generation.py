@@ -134,6 +134,12 @@ class RequestCompiler(unittest.TestCase):
         healthy = yue_worker.classify_audio_quality(
             [0.08, 0.1, 0.16, 0.22, 0.3], 0.97, 0.18, 0.0001)
         self.assertTrue(healthy["accepted"])
+        dropouts = yue_worker.classify_audio_quality(
+            [0.08] * 4 + [0.30, 0.001, 0.31, 0.0004, 0.29, 0.001,
+                          0.32, 0.0005, 0.30, 0.001, 0.28] + [0.07] * 4,
+            0.91, 0.16, 0)
+        self.assertFalse(dropouts["accepted"])
+        self.assertIn("dropouts", dropouts["reason"])
 
     def test_planned_score_must_pass_yues_native_inspector(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -151,8 +157,64 @@ class RequestCompiler(unittest.TestCase):
             self.assertIn("group 9, Vocal", checked["reason"])
             self.assertIn("discarded", checked["reason"])
 
+    def test_planned_audio_must_cover_most_of_the_score(self):
+        score = {"accepted": True, "nominal_duration_seconds": 58.9}
+        cut_short = yue_worker.check_planned_audio_coverage(score, 29.8)
+        self.assertFalse(cut_short["accepted"])
+        self.assertIn("29.8s", cut_short["reason"])
+        complete = yue_worker.check_planned_audio_coverage(score, 55.0)
+        self.assertTrue(complete["accepted"])
+
+    def test_score_inspector_preserves_nominal_duration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            tool = root / "skills" / "yue2-music" / "scripts" / "abc_tools.py"
+            tool.parent.mkdir(parents=True)
+            tool.write_text("# test tool\n")
+            score = root / "score.abc"
+            score.write_text("X:1")
+            passed = SimpleNamespace(returncode=0, stderr="", stdout='{"nominal_duration_seconds": 61.5}')
+            with mock.patch("yue_worker.subprocess.run", return_value=passed):
+                checked = yue_worker.inspect_abc_score(score, root)
+            self.assertTrue(checked["accepted"])
+            self.assertEqual(61.5, checked["nominal_duration_seconds"])
+
 
 class ParamsAndScene(unittest.TestCase):
+    def test_minimum_duration_survives_scene_compilation(self):
+        params = server.clamp_music_params({"lyrics": "[Verse]\nHello", "min_duration_seconds": 150})
+        result = server.music_request_from_scene({"id": "test", "prompt": "piano pop", "params": params})
+        self.assertEqual(result["request"]["min_duration_seconds"], 150)
+        self.assertTrue(server._retryable_music_error("YuE candidate too short: 60s"))
+
+    def test_busy_worker_waits_instead_of_failing_the_song(self):
+        compiled = {"request": {"seed": 4}, "audit": {"plan_mode": "full", "estimated_seconds": 30}}
+        project = {"slug": "demo"}
+        busy = ValueError("Music worker said 409: The GPU is generating another song. Try again when it is free.")
+        ready = {"id": "job-2"}
+        terminal = {"status": "ready", "result": {}, "progress": {"phase": "done"}}
+        with mock.patch.object(server, "_music_scene_gone", return_value=False), \
+             mock.patch.object(server, "yue_worker_call", side_effect=[busy, ready, terminal]) as call, \
+             mock.patch.object(server, "load_project_slug", return_value={"scenes": [{"id": "scene"}]}), \
+             mock.patch.object(server, "save_project"), \
+             mock.patch.object(server.time, "sleep"):
+            worker_id, state = server._run_music_worker_attempt("scene", project, compiled, 1, 3)
+        self.assertEqual("job-2", worker_id)
+        self.assertEqual("ready", state["status"])
+        self.assertEqual(3, call.call_count)
+
+    def test_only_candidate_quality_failures_retry(self):
+        for message in ("truncated output", "invalid score at bar 4",
+                        "rendered only 29.8s of a 58.9s planned arrangement"):
+            self.assertTrue(server._retryable_music_error(message))
+        self.assertFalse(server._retryable_music_error("killed by the operating system"))
+        self.assertFalse(server._retryable_music_error("worker unreachable"))
+
+    def test_retry_seeds_are_distinct_and_repeatable(self):
+        seeds = [server._next_music_seed(45243, attempt) for attempt in range(3)]
+        self.assertEqual(seeds, [45243, 149972, 254701])
+        self.assertEqual(len(seeds), len(set(seeds)))
+
     def test_music_params_drop_every_video_knob(self):
         clamped = server.clamp_music_params({"frames": 56, "width": 768, "steps": 20, "seed": "7",
                                              "plan_mode": "melody", "lyrics": "x" * 9000,
@@ -193,6 +255,34 @@ class ParamsAndScene(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["cot"], "full")
         self.assertEqual(first["id"], "kettle")
+
+    def test_explicit_instrumental_brief_repairs_missing_saved_boolean(self):
+        scene = {"id": "s4", "name": "Glasshouse",
+                 "prompt": "Lo-fi house, instrumental arrangement, no lead vocal, no sung words",
+                 "params": server.clamp_music_params(
+                     {"lyrics": "[Instrumental]", "seed": 12, "plan_mode": "full", "instrumental": False})}
+        compiled = server.music_request_from_scene(scene)
+        self.assertEqual(yue.INSTRUMENTAL_LYRICS, compiled["request"]["lyrics"])
+        self.assertTrue(compiled["audit"]["instrumental"])
+        self.assertIn(yue.INSTRUMENTAL_STYLE_TAG, compiled["request"]["style"])
+
+    def test_long_instrumental_brief_cannot_truncate_no_vocal_direction(self):
+        compiled = yue.format_music_request(
+            idea="Detailed devotional piano and strings arrangement. " * 80,
+            lyrics="",
+            instrumental=True,
+        )
+        self.assertTrue(compiled["request"]["style"].startswith(yue.INSTRUMENTAL_STYLE_TAG))
+        self.assertIn("no lead vocal, no sung words", compiled["request"]["style"])
+        self.assertLessEqual(len(compiled["request"]["style"]), yue.MAX_STYLE_CHARS)
+
+    def test_sung_words_override_instrumental_word_in_style(self):
+        scene = {"id": "s5", "name": "Voice", "prompt": "Instrumental textures with female vocals",
+                 "params": server.clamp_music_params(
+                     {"lyrics": "[Verse]\nSing this line", "seed": 12, "plan_mode": "full"})}
+        compiled = server.music_request_from_scene(scene)
+        self.assertEqual("[Verse]\nSing this line", compiled["request"]["lyrics"])
+        self.assertFalse(compiled["audit"]["instrumental"])
 
 
 class Registry(unittest.TestCase):

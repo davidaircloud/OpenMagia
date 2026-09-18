@@ -22,7 +22,8 @@ let timelineViewSeconds = 0;
 let timelineExtendFrame = 0;
 let playTime = 0;
 let playing = false;
-let loop = false;
+let loop = localStorage.getItem('openmagia-loop') === 'true';
+let programWindow = null;
 let globalMute = false;
 let lastNow = 0;
 let rafId = 0;
@@ -69,6 +70,7 @@ let timelineMagiaSeed = 0;
 let timelineMagiaPlanning = false;
 let timelineMagiaInterpreting = false;
 let timelineMagiaTimer = 0;
+let timelineMagiaRequest = 0;
 let timelineMagiaRecipe = 'subtle';
 let appliedLayoutSlug = null;
 let layoutSaveTimer = 0;
@@ -81,6 +83,7 @@ let inspectorControlActive = false;
 let clipSavePending = 0;
 let clipMutationEpoch = 0;
 let pluginCatalog = [];
+let bundledPlugins = [];
 let pluginTab = 'installed';
 let activePlugin = null;
 let pluginGenerationSnapshot = new Map();
@@ -166,7 +169,7 @@ async function refresh(force = false) {
     // lower practical decoder ceiling than Chromium, so retaining old hidden
     // elements eventually makes a healthy page appear blank or unresponsive.
     for(const id of Object.keys(videoEls))if(!timelineMediaIds.has(videoEls[id].dataset.mediaId||id)){videoEls[id].pause&&videoEls[id].pause();videoEls[id].remove();delete videoEls[id];}
-    for(const id of Object.keys(audioEls))if(!timelineMediaIds.has(id)){audioEls[id].pause();if(audioGains[id]){try{audioGains[id].disconnect();}catch(_){}}audioEls[id].remove();delete audioEls[id];delete audioGains[id];}
+    for(const id of Object.keys(audioEls))if(!timelineMediaIds.has(audioEls[id].dataset.mediaId||id)){audioEls[id].pause();if(audioGains[id]){try{audioGains[id].disconnect();}catch(_){}}audioEls[id].remove();delete audioEls[id];delete audioGains[id];}
     for (const id of timelineMediaIds) {
       const m = state.media.find(item => item.id === id);
       if (!m || (m.status && m.status !== 'ready')) continue;
@@ -194,7 +197,7 @@ function scheduleRefreshPoll(){
   refreshTimer=setTimeout(async()=>{if(!inspectorControlActive&&!clipSavePending)await refresh();scheduleRefreshPoll();},1500);
 }
 function handleVisibilityChange(){
-  if(document.hidden){clearTimeout(refreshTimer);refreshTimer=0;if(playing)pause();releaseMediaDecoders();return;}
+  if(document.hidden){clearTimeout(refreshTimer);refreshTimer=0;if(programOutputActive())return;if(playing)pause();releaseMediaDecoders();return;}
   refresh().finally(scheduleRefreshPoll);
 }
 
@@ -247,7 +250,7 @@ function timelineCanvasEnd() {
   return timelineViewSeconds;
 }
 function extendTimelineCanvas() {
-  const scroll=$('#tlScroll');if(!scroll||timelineExtendFrame)return;
+  const scroll=$('#tlScroll');if(!scroll||!scroll.clientWidth||hubView!=='editor'||timelineExtendFrame)return;
   const threshold=Math.max(160,scroll.clientWidth*.2);
   if(scroll.scrollLeft+scroll.clientWidth<scroll.scrollWidth-threshold)return;
   timelineExtendFrame=requestAnimationFrame(()=>{timelineExtendFrame=0;const left=scroll.scrollLeft;timelineViewSeconds+=Math.max(30,scroll.clientWidth/pxPerSec);renderTimeline();scroll.scrollLeft=left;});
@@ -274,7 +277,13 @@ function getVideoEl(media,clipId) {
   let el = videoEls[key];
   if (!el) {
     el = media.kind === 'image' ? document.createElement('img') : document.createElement('video');
-    if (media.kind !== 'image') { el.muted = true; el.playsInline = true; el.preload = 'auto'; }
+    if (media.kind !== 'image') {
+      el.muted = true; el.playsInline = true; el.preload = 'auto';
+      // Setting currentTime is asynchronous. A paused canvas otherwise keeps
+      // painting the previously decoded frame until some unrelated UI event
+      // triggers another draw, so the frame under the playhead looks wrong.
+      el.addEventListener('seeked', () => { if (!playing) drawNow(); });
+    }
     el.src = mediaUrl(media);
     if (media.kind === 'image') { el.addEventListener('load', () => { if (!playing) drawNow(); }); }
     pool.appendChild(el);
@@ -283,13 +292,16 @@ function getVideoEl(media,clipId) {
   }
   return el;
 }
-function getAudioEl(media) {
-  let el = audioEls[media.id];
+function getAudioEl(media,clipId) {
+  const first=((state&&state.tracks)||[]).flatMap(track=>track.clips||[]).find(clip=>clip.mediaId===media.id);
+  const key=!clipId||!first||first.id===clipId?media.id:media.id+':'+clipId;
+  let el = audioEls[key];
   if (!el) {
     el = document.createElement('audio');
     el.preload = 'auto'; el.src = mediaUrl(media); el.muted = false; el.playsInline = true;
     pool.appendChild(el);
-    audioEls[media.id] = el;
+    el.dataset.mediaId=media.id;el.dataset.audioKey=key;
+    audioEls[key] = el;
     // Safari can report a playing hidden media element without delivering it
     // audibly. Route timeline sources through an explicit Web Audio graph;
     // the context is resumed synchronously from the Play user gesture.
@@ -300,7 +312,7 @@ function getAudioEl(media) {
         const source = audioContext.createMediaElementSource(el);
         const gain = audioContext.createGain();
         source.connect(gain); gain.connect(audioContext.destination);
-        audioGains[media.id] = gain;
+        audioGains[key] = gain;
       }
     } catch (error) { console.warn('Web Audio fallback unavailable', error); }
   }
@@ -398,7 +410,28 @@ function motionState(motion, p) {
   }
 }
 
+function transformLayerClip(clip, layer) {
+  // A live view lets each layer reuse the keyframe editor without changing its siblings.
+  const view={...clip,zoom:1,motion:{type:'none'},transformLayers:[],_stackClip:clip,_layer:layer};
+  Object.defineProperty(view,'keyframes',{get:()=>layer.keyframes,set:value=>{layer.keyframes=value;},enumerable:true});
+  return view;
+}
+function transformLanes(c) {
+  return [c,...(c.transformLayers||[]).map(layer=>transformLayerClip(c,layer))];
+}
 function clipMotion(clip, localT) {
+  const result=singleClipMotion(clip,localT);
+  for(const layer of clip.transformLayers||[]) {
+    if(!transformPoints({keyframes:layer.keyframes}).length)continue;
+    const next=singleClipMotion(transformLayerClip(clip,layer),localT);
+    result.zoom*=next.zoom;
+    result.center.x+=next.center.x-.5;result.center.y+=next.center.y-.5;
+  }
+  result.zoom=Math.max(.1,result.zoom);
+  result.center.x=clamp(result.center.x,0,1);result.center.y=clamp(result.center.y,0,1);
+  return result;
+}
+function singleClipMotion(clip, localT) {
   const dur = Math.max(0.05, (clip.out - clip.in));
   const p = clamp(localT / dur, 0, 1);
   const points = transformPoints(clip);
@@ -435,15 +468,15 @@ function storedTransformPoints(clip) {
 }
 
 function ensureTransformPoints(c) {
-  const points = transformPoints(c); c.keyframes = points.length ? {points} : null; return points;
+  const points = storedTransformPoints(c); c.keyframes = points.length ? {...c.keyframes,points} : null; return points;
 }
 function splitTransformKeyframes(c,splitRatio){
-  const points=transformPoints(c);if(!points.length)return [null,null];const p=clamp(splitRatio,.0001,.9999);
+  const points=storedTransformPoints(c);if(!points.length)return [null,null];const p=clamp(splitRatio,.0001,.9999);
   const sample=at=>{let a=points[0],b=points[points.length-1];for(let i=0;i<points.length-1;i++)if(at>=points[i].at&&at<=points[i+1].at){a=points[i];b=points[i+1];break;}if(at<=points[0].at)a=b=points[0];if(at>=points[points.length-1].at)a=b=points[points.length-1];const q=a===b?0:clamp((at-a.at)/Math.max(.0001,b.at-a.at),0,1),ease=q*q*(3-2*q),mix=(key,fallback)=>(Number.isFinite(+a[key])?+a[key]:fallback)+((Number.isFinite(+b[key])?+b[key]:fallback)-(Number.isFinite(+a[key])?+a[key]:fallback))*ease;return {zoom:mix('zoom',1),x:mix('x',.5),y:mix('y',.5)};};
   const boundary=sample(p),stamp=Date.now();
   const left=[...points.filter(x=>x.at<p-.00001).map(x=>({...x,at:x.at/p})),{id:'kf-split-left-'+stamp,at:1,...boundary}];
   const right=[{id:'kf-split-right-'+stamp,at:0,...boundary},...points.filter(x=>x.at>p+.00001).map(x=>({...x,id:x.id+'-right-'+stamp,at:(x.at-p)/(1-p)}))];
-  return [{points:left},{points:right}];
+  return [{...c.keyframes,points:left},{...c.keyframes,points:right}];
 }
 function transitionItems(c){
   const tr=c.transition||{};
@@ -453,7 +486,7 @@ function transitionItems(c){
 }
 function transitionPayload(items){return {items:items.map(x=>({...x,dur:+x.dur||0,enabled:x.enabled!==false}))};}
 function enabledTransitions(c,edge){return transitionItems(c).filter(x=>x.enabled!==false&&(x.edge||'start')===edge&&+x.dur>0).slice(-1);}
-function clipHasAnimation(c){return transformPoints(c).length>0||transitionItems(c).length>0;}
+function clipHasAnimation(c){return transformLanes(c).some(x=>storedTransformPoints(x).length)||transitionItems(c).length>0;}
 function drawContain(ctx, el, zoom, canvas) {
   const W = canvas.width, H = canvas.height;
   const vw = el.videoWidth || el.naturalWidth || W, vh = el.videoHeight || el.naturalHeight || H;
@@ -602,11 +635,11 @@ function audioSources(t) {
       const localT = t - c.start;
       let gain = 1;
       const fades=c.audioFade||{},fadeIn=clamp(+fades.in||0,0,d),fadeOut=clamp(+fades.out||0,0,d);
-      gain*=clamp(Number.isFinite(+c.volume)?+c.volume:1,0,2);
       if(fadeIn>0)gain=Math.min(gain,localT/fadeIn);
       if(fadeOut>0)gain=Math.min(gain,(d-localT)/fadeOut);
+      gain*=clamp(Number.isFinite(+c.volume)?+c.volume:1,0,2);
       const on = !globalMute && !tr.muted && !c.muted && !c.detached;
-      out.push({ mediaId: c.mediaId, pos: c.in + localT, gain, on });
+      out.push({ clipId:c.id, mediaId: c.mediaId, pos: c.in + localT, gain, on });
     }
   }
   for (const tr of state.tracks.filter(x => x.kind === 'audio')) {
@@ -617,7 +650,7 @@ function audioSources(t) {
       let gain=1;if(fadeIn>0)gain=Math.min(gain,localT/fadeIn);if(fadeOut>0)gain=Math.min(gain,(d-localT)/fadeOut);
       gain*=clamp(Number.isFinite(+c.volume)?+c.volume:1,0,2);
       const on = !globalMute && !tr.muted && !c.muted;
-      out.push({ mediaId: c.mediaId, pos: c.in + localT, gain, on });
+      out.push({ clipId:c.id, mediaId: c.mediaId, pos: c.in + localT, gain, on });
     }
   }
   return out;
@@ -628,14 +661,14 @@ function updateAudio(t) {
   const active = new Set();
   for (const s of srcs) {
     const m = mediaById(s.mediaId); if (!m) continue;
-    const a = getAudioEl(m);
-    setAudioGain(s.mediaId, s.on ? s.gain : 0);
+    const a = getAudioEl(m,s.clipId),key=a.dataset.audioKey;
+    setAudioGain(key, s.on ? s.gain : 0);
     if (playing) {
-      active.add(s.mediaId);
+      active.add(key);
       // Once started, let the media element's native audio clock run freely.
       // Re-seeking after a slow canvas/UI frame makes Safari decode again and
       // produces audible stutters. Explicit timeline seeks clear the set.
-      if (!activeAudioIds.has(s.mediaId)) {
+      if (!activeAudioIds.has(key)) {
         try { a.currentTime = s.pos; } catch (e) {}
       }
       if (a.paused) a.play().catch(() => {});
@@ -647,8 +680,9 @@ function updateAudio(t) {
 
 /* ---------------- main loop ---------------- */
 function tick() {
+  if(programWindow&&!programOutputActive()){programWindow=null;if(document.hidden){pause();releaseMediaDecoders();}}
   // reschedule first so a transient error can never kill the render loop
-  rafId = requestAnimationFrame(tick);
+  rafId = programOutputActive() ? setTimeout(tick, 1000 / 60) : requestAnimationFrame(tick);
   const now = performance.now();
   const dt = (now - lastNow) / 1000; lastNow = now;
   if (!state) return;
@@ -656,9 +690,10 @@ function tick() {
     if (playing) {
       playTime += dt;
       const total = timelineEnd();
-      if (playTime >= total) { if (loop) { playTime = 0; activeAudioIds.clear(); } else { playTime = total; pause(); } }
+      if (playTime >= total) { if (loop && total > 0) { playTime %= total; activeAudioIds.clear(); } else { playTime = total; pause(); } }
     }
     drawFrame(playTime);
+    mirrorProgramOutput();
     updateAudio(playTime);
     updatePlayhead();
     updateTimecode();
@@ -669,6 +704,38 @@ function updateTimecode() { $('#timecode').innerHTML = fmtTime(playTime) + ' <sm
 function drawNow() { drawFrame(playTime); updateAudio(playTime); updatePlayhead(); updateTimecode(); }
 
 /* ---------------- transport ---------------- */
+function syncLoopButton(){
+  const button=$('#loopBtn');button.classList.toggle('on',loop);button.setAttribute('aria-pressed',String(loop));
+  button.title=loop?'Loop on · repeat the whole timeline':'Loop off · stop at the end';
+}
+function programOutputActive(){return !!programWindow&&!programWindow.closed;}
+function openProgramOutput(){
+  if(!state)throw new Error('Open a project first.');
+  if(programOutputActive()){programWindow.focus();return {open:true};}
+  const win=window.open('/Preview', 'OpenMagiaPreview', 'popup,width=960,height=540');
+  if(!win)throw new Error('Popup blocked. Allow popups for OpenMagia, then click Output in the playback toolbar.');
+  programWindow=win;
+  const title='Preview · '+(state.name||'Video');
+  win.addEventListener('load',()=>{
+    win.document.title=title;
+    win.document.querySelector('canvas')?.addEventListener('dblclick',()=>win.document.documentElement.requestFullscreen?.().catch(()=>{}));
+    mirrorProgramOutput();
+  },{once:true});
+  // The normal editor visibility handler releases media. Output sessions must
+  // keep their single playback clock alive when OBS or another tab has focus.
+  cancelAnimationFrame(rafId);clearTimeout(rafId);lastNow=performance.now();tick();
+  mirrorProgramOutput();
+  return {open:true,title,audio:'Capture the editor browser application audio in OBS.'};
+}
+function mirrorProgramOutput(){
+  if(!programOutputActive())return;
+  try{const source=$('#preview'),target=programWindow.document.querySelector('canvas');if(!target)return;
+    if(target.width!==source.width||target.height!==source.height){target.width=source.width;target.height=source.height;}
+    target.getContext('2d').drawImage(source,0,0);
+  }catch(error){programWindow=null;console.warn('Program output closed or navigated',error);}
+}
+window.addEventListener('beforeunload',()=>{if(programOutputActive())programWindow.close();});
+
 function unlockAudio() {
   // Browsers only allow media.play() after a user gesture. The play button
   // click is that gesture, so start (then let the loop steer) every active
@@ -677,10 +744,10 @@ function unlockAudio() {
   if (audioContext && audioContext.state !== 'running') audioContext.resume().catch(error => console.warn('Audio context resume failed', error));
   for (const s of srcs) {
     const m = mediaById(s.mediaId); if (!m) continue;
-    const a = getAudioEl(m);
-    setAudioGain(s.mediaId, s.on ? s.gain : 0);
+    const a = getAudioEl(m,s.clipId),key=a.dataset.audioKey;
+    setAudioGain(key, s.on ? s.gain : 0);
     try { a.currentTime = s.pos; } catch (e) {}
-    if (s.on) { activeAudioIds.add(s.mediaId); const pr = a.play(); if (pr) pr.catch(() => {}); }
+    if (s.on) { activeAudioIds.add(key); const pr = a.play(); if (pr) pr.catch(() => {}); }
     else if (!a.paused) a.pause();
   }
 }
@@ -742,7 +809,7 @@ function renderTimeline() {
     const hasAudioAutomation=tr.kind==='audio'&&tr.clips.some(c=>c.audioFade&&((+c.audioFade.in||0)>0||(+c.audioFade.out||0)>0));
     const row = div('tlrow' + (tr.kind === 'audio' ? ' audio' : '') + ((hasTransform||hasAudioAutomation) ? ' has-keyframes' : '')+(tr.muted?' muted':''));
     if(tr.kind==='video'){
-      const automationRows=Math.max(0,...tr.clips.map(c=>transformPoints(c).length?1+transitionItems(c).length:transitionItems(c).length));
+      const automationRows=Math.max(0,...tr.clips.map(c=>transformLanes(c).filter(x=>storedTransformPoints(x).length).length+transitionItems(c).length));
       if(automationRows)row.style.minHeight=(58+automationRows*23)+'px';
     }
     if(hasAudioAutomation)row.style.minHeight='81px';
@@ -866,17 +933,18 @@ function renderClip(tr, c) {
   const cn = div('cn'); cn.textContent = (m ? m.name : '?') + (c.detached ? ' · audio' : ''); body.appendChild(cn);
   if (tr.kind !== 'audio') { const cd = div('cd'), clipZoom = Number.isFinite(+c.zoom) ? +c.zoom : 1; cd.textContent = fmtDur(c.out - c.in) + (clipZoom !== 1 ? ' · ' + clipZoom.toFixed(1) + '×' : ''); body.appendChild(cd); }
   el.appendChild(body);
-  const clipPoints = tr.kind === 'video' ? transformPoints(c) : [];
+  const lanes = tr.kind === 'video' ? transformLanes(c).filter(x=>storedTransformPoints(x).length) : [];
   const clipTransitions = tr.kind==='video'?transitionItems(c):[];
   const hasAudioFades=tr.kind==='audio'&&!!c.audioFade&&((+c.audioFade.in||0)>0||(+c.audioFade.out||0)>0);
-  const automationRows=(clipPoints.length?1:0)+clipTransitions.length+(hasAudioFades?1:0);if(automationRows)body.style.bottom=(4+automationRows*23)+'px';
+  const automationRows=lanes.length+clipTransitions.length+(hasAudioFades?1:0);if(automationRows)body.style.bottom=(4+automationRows*23)+'px';
   if(hasAudioFades)appendAudioFadeRail(el,c);
-  if (clipPoints.length) {
-    const rail = div('keyframeRail transformRail');
-    rail.style.bottom=(6+clipTransitions.length*23)+'px';
+  lanes.forEach((lane,index)=>{
+    const clipPoints=storedTransformPoints(lane);
+    const rail = div('keyframeRail transformRail'+(lane.keyframes.enabled===false?' disabled':''));
+    rail.style.bottom=(6+(clipTransitions.length+index)*23)+'px';
     const label = div('keyframeLabel');
     const a=clipPoints[0],b=clipPoints[clipPoints.length-1],positionChanged=Math.abs((+a.x||.5)-(+b.x||.5))>.001||Math.abs((+a.y||.5)-(+b.y||.5))>.001;
-    label.textContent='Transform · Zoom '+(+a.zoom||1).toFixed(2)+'× → '+(+b.zoom||1).toFixed(2)+'×'+(positionChanged?' · Position':''); rail.appendChild(label);
+    label.textContent=(lane._layer?lane._layer.name:'Transform')+(lane.keyframes.enabled===false?' · off':'')+' · Zoom '+(+a.zoom||1).toFixed(2)+'× → '+(+b.zoom||1).toFixed(2)+'×'+(positionChanged?' · Position':''); rail.appendChild(label);
     const clipPx = Math.max(6,(c.out-c.in)*pxPerSec); const stackedAt = [];
     for (const point of clipPoints) {
       const diamond = document.createElement('button'); diamond.className = 'timelineKeyframe';
@@ -886,10 +954,10 @@ function renderClip(tr, c) {
       const near = stackedAt.filter(at => Math.abs(at-point.at)*clipPx < 14).length; stackedAt.push(point.at);
       diamond.style.setProperty('--keyframe-stack',String(near));
       diamond.style.zIndex = String(7 + near);
-      diamond.addEventListener('pointerdown', e => onKeyframeDown(e, c, point.id, diamond)); rail.appendChild(diamond);
+      diamond.addEventListener('pointerdown', e => onKeyframeDown(e, lane, point.id, diamond)); rail.appendChild(diamond);
     }
     el.appendChild(rail);
-  }
+  });
   clipTransitions.forEach((item,index)=>{
     const rail=div('keyframeRail transitionRail'+(item.enabled===false?' disabled':''));rail.dataset.transitionId=item.id;rail.style.bottom=(6+index*23)+'px';
     const ratio=clamp(+item.dur/Math.max(.05,c.out-c.in),0,1),at=(item.edge||'start')==='end'?1-ratio:ratio;
@@ -928,9 +996,9 @@ function onKeyframeDown(e, c, pointId, diamond) {
   e.preventDefault(); e.stopPropagation();
   if (document.activeElement && $('#inspector').contains(document.activeElement)) document.activeElement.blur();
   selectedTransition=null;
-  const clicked = transformPoints(c).find(p=>p.id===pointId);
+  const clicked = storedTransformPoints(c).find(p=>p.id===pointId);
   if (clicked) { playTime=c.start+clicked.at*Math.max(.05,c.out-c.in); drawNow(); }
-  selectedKeyframe={clipId:c.id,pointId}; revealSelectedKeyframe=true; $$('.timelineKeyframe').forEach(x=>x.classList.toggle('selected',x===diamond)); select({type:'clip',id:c.id});
+  selectedKeyframe={clipId:c.id,pointId}; inspectorClipTab='animate'; revealSelectedKeyframe=true; $$('.timelineKeyframe').forEach(x=>x.classList.toggle('selected',x===diamond)); select({type:'clip',id:c.id});
   if (diamond.setPointerCapture) { try { diamond.setPointerCapture(e.pointerId); } catch (_) {} }
   ensureTransformPoints(c); const rail = diamond.closest('.keyframeRail'); const point = c.keyframes.points.find(p=>p.id===pointId); if (!point) return;
   diamond.classList.add('dragging'); document.body.classList.add('dragging-keyframe');
@@ -970,12 +1038,9 @@ function onClipDown(e, tr, c, el) {
   if (e.target.classList.contains('trim')) return;
   e.preventDefault();
   selectedKeyframe = null;
-  const clipRect=el.getBoundingClientRect(),clipDuration=Math.max(.05,c.out-c.in);
-  seekTo(c.start+clamp((e.clientX-clipRect.left)/Math.max(1,clipRect.width),0,1)*clipDuration);
-  drawNow();
+  const clipDuration=Math.max(.05,c.out-c.in);
   select({ type: 'clip', id: c.id });
-  const startX = e.clientX; const origStart = c.start; const origIn = c.in, origOut = c.out;
-  const media = mediaById(c.mediaId); const dur = media ? media.duration : (origOut - origIn);
+  const startX = e.clientX; const origStart = c.start;
   let targetTrack = tr; let targetLane = el.closest('.tlane'); const sourceRow = targetLane.closest('.tlrow');
   const move = (ev) => {
     if (c.keyframes && tr.kind === 'video') {
@@ -999,6 +1064,9 @@ function onClipDown(e, tr, c, el) {
     const desired=targetTrack.id===tr.id?Math.max(0,origStart+dsec):Math.max(0,laneTime(ev.clientX,targetLane));
     c.start=resolvedClipStart(targetTrack,c.id,desired,clipDuration);
     positionClip(el, c);
+    // Editing a clip never edits transport position. Redraw only so the
+    // fixed playhead immediately shows whatever is now underneath it.
+    drawNow();
   };
   const up = async (ev) => {
     window.removeEventListener('pointermove', move);
@@ -1017,19 +1085,32 @@ function onTrimDown(e, tr, c, which) {
   e.preventDefault(); e.stopPropagation();
   select({ type: 'clip', id: c.id });
   const media = mediaById(c.mediaId);
-  const dur = media ? (media.kind === 'image' ? 60 : media.duration) : (c.out - c.in);
+  const isStill=!!(media&&media.kind==='image');
+  // Still images have no source endpoint. Their display duration is authored
+  // on the timeline, so only a neighbouring clip (not an arbitrary 60-second
+  // ceiling) may constrain the trim.
+  const dur = media ? (isStill ? Number.POSITIVE_INFINITY : media.duration) : (c.out - c.in);
   const el = clipElById(c.id);
   const originalStart=+c.start||0,originalIn=+c.in||0,originalOut=+c.out||0;
+  const originalDuration=Math.max(.05,originalOut-originalIn);
   const fixedRight=originalStart+(originalOut-originalIn);
   const previousEnd=Math.max(0,...(tr.clips||[]).filter(other=>other.id!==c.id&&other.start+(other.out-other.in)<=originalStart+.000001).map(other=>other.start+(other.out-other.in)));
   const startX=e.clientX;
   const move = (ev) => {
     const delta=(ev.clientX-startX)/pxPerSec;
     if (which === 'l') {
-      const earliest=Math.max(previousEnd,originalStart-originalIn),nextStart=clamp(originalStart+delta,earliest,fixedRight-.05);
-      c.start=nextStart;
-      c.in=clamp(originalIn+(nextStart-originalStart),0,originalOut-.05);
-      c.out=originalOut;
+      if(isStill){
+        // A still has no source-time head to expose. Resize its display
+        // duration instead, keeping the right edge fixed while the left edge
+        // can extend back to the preceding clip (or the timeline start).
+        const earliest=Math.max(previousEnd,fixedRight-dur),nextStart=clamp(originalStart+delta,earliest,fixedRight-.05);
+        c.start=nextStart;c.in=originalIn;c.out=originalIn+(fixedRight-nextStart);
+      }else{
+        const earliest=Math.max(previousEnd,originalStart-originalIn),nextStart=clamp(originalStart+delta,earliest,fixedRight-.05);
+        c.start=nextStart;
+        c.in=clamp(originalIn+(nextStart-originalStart),0,originalOut-.05);
+        c.out=originalOut;
+      }
     } else {
       const next=(tr.clips||[]).filter(other=>other.id!==c.id&&other.start>=originalStart).sort((a,b)=>a.start-b.start)[0];
       const maxOut=next?Math.min(dur,c.in+Math.max(.05,next.start-c.start)):dur;
@@ -1037,6 +1118,9 @@ function onTrimDown(e, tr, c, which) {
     }
     positionClip(el, c);
     el.style.width = Math.max(6, (c.out - c.in) * pxPerSec) + 'px';
+    // Trimming changes the clip only; the transport remains exactly where the
+    // user placed it.
+    drawNow();
   };
   const up = async () => {
     window.removeEventListener('pointermove', move);
@@ -1068,17 +1152,25 @@ function seekFromTimelinePointer(e, lane) {
 
 /* ---------------- selection ---------------- */
 function select(s) {
+  const changed=!sel||!s||sel.type!==s.type||sel.id!==s.id;
+  const previousActive=document.activeElement;
+  if(changed&&previousActive&&$('#inspector').contains(previousActive))previousActive.blur();
   sel = s;
+  if(changed)selectedTransition=null;
   $$('.clip').forEach(c => c.classList.remove('sel'));
   $$('.mtile').forEach(c => c.classList.remove('sel'));
   $$('.scene').forEach(c => c.classList.remove('sel'));
-  if (s && s.type === 'clip') { const el = clipElById(s.id); if (el) el.classList.add('sel'); const c=findClip(s.id); if(c&&trackOfClip(c)?.kind==='video')focusClipPreview(c); }
+  // Selection is an editing action, not a transport action. The playhead only
+  // moves through playback or an explicit seek on the ruler/timeline.
+  if (s && s.type === 'clip') { const el = clipElById(s.id); if (el) el.classList.add('sel'); }
   if (s && s.type === 'media') { const el = document.querySelector('.mtile[data-media="' + s.id + '"]'); if (el) el.classList.add('sel'); }
   if (s && s.type === 'scene') { const el = document.querySelector('.scene[data-scene="' + s.id + '"]'); if (el) el.classList.add('sel'); const scene=state.scenes.find(x=>x.id===s.id),tile=scene&&document.querySelector('.mtile[data-media="'+scene.mediaId+'"]');if(tile)tile.classList.add('sel'); }
   if (s) setInspectorTab('inspect');
   const active = document.activeElement;
   const editingInspector = active && $('#inspector').contains(active) && (['INPUT','TEXTAREA','SELECT'].includes(active.tagName) || active.isContentEditable);
-  if (!editingInspector) renderInspector();
+  // A newly selected clip always owns the Inspector immediately. An input in
+  // the previous clip must never keep that clip's controls mounted.
+  if (changed || !editingInspector) renderInspector();
   updateDetachAudioTool();
   drawNow();
 }
@@ -1117,6 +1209,13 @@ function openFolderConflictSheet(ids,folder,conflicts){
   });
 }
 
+function selectedMediaId(){
+  if(!sel)return '';
+  if(sel.type==='media')return sel.id;
+  if(sel.type!=='scene')return '';
+  const scene=state.scenes.find(s=>s.id===sel.id)||{};
+  return scene.mediaId||((state.media||[]).find(m=>m.scene_id===sel.id)||{}).id||'';
+}
 function renderMedia() {
   const grid = $('#mediaGrid'); if (!grid) return;
   const q = mediaQuery.trim().toLowerCase();
@@ -1139,7 +1238,7 @@ function renderMedia() {
   const nextRenderKey = JSON.stringify({
     project: state.slug || '', folder: mediaFolder, query: q,
     sort: mediaSort, view: mediaView,
-    selected: sel && sel.type === 'media' ? sel.id : (sel && sel.type === 'scene' ? ((state.scenes.find(s=>s.id===sel.id)||{}).mediaId||'') : ''),
+    selected: selectedMediaId(),
     folders: foldersAll,
     folderMeta: state.mediaFolderMeta || {},
     media: all.map(m => [m.id, m.name, m.kind, m.src, m.thumb, m.folder, m.folder_link, m.folder_unique,
@@ -1193,8 +1292,7 @@ function renderMedia() {
   }
   for (const m of items) {
     const tile = div('mtile'); tile.dataset.media = m.id;
-    const selectedMediaId=sel&&sel.type==='media'?sel.id:(sel&&sel.type==='scene'?((state.scenes.find(s=>s.id===sel.id)||{}).mediaId||''):'');
-    if (selectedMediaId === m.id) tile.classList.add('sel');
+    if (selectedMediaId() === m.id) tile.classList.add('sel');
     const thumb = div('thumb');
     if (m.status === 'queued' || m.status === 'running') {
       const pending = div('generationPending'); pending.innerHTML = '<span></span><b>' + (m.status === 'running' ? 'Generating…' : 'Waiting in queue') + '</b>';
@@ -1280,7 +1378,9 @@ function onLaneDrop(e, tr, lane) {
   const clipDuration=isImg?3.0:m.duration;
   const clip = { trackId: tr.id, mediaId: m.id, start: resolvedClipStart(tr,null,Math.max(0,t),clipDuration), in: 0,
     out: isImg ? 3.0 : m.duration, zoom: 1.0,
-    motion: isImg ? { type: 'push-in' } : null,
+    // A still is static by default. Motion is an authored effect chosen in
+    // Transform/Magia; extracting a frame must never silently create a zoom.
+    motion: isImg ? { type: 'none' } : null,
     transition: { type: 'cut', dur: 0 }, muted: false, detached: false };
   api('/api/clips', { method: 'POST', body: clip }).then(() => { toast('Added ' + m.name + ' to ' + tr.name, 'ok'); refresh(); }).catch(err => toast(err.message, 'err'));
 }
@@ -1328,8 +1428,9 @@ function renderInspector({preserveScroll=false}={}) {
   // src is stable until regeneration replaces it).
   if(preserveScroll&&sel&&(sel.type==='media'||sel.type==='scene')){const cur=sel.type==='media'?mediaById(sel.id):mediaById((state.scenes.find(s=>s.id===sel.id)||{}).mediaId);const priorPreview=$('.inspectorMediaPreview',body);const want=cur?mediaUrl(cur):'';if(priorPreview&&priorPreview.dataset.src===want)return;}
   const priorPrompt=$('.sceneSourcePrompt',body),promptState=priorPrompt?{scrollTop:priorPrompt.scrollTop,start:priorPrompt.selectionStart,end:priorPrompt.selectionEnd}:null;
+  const priorLyrics=$('.musicInspectorLyrics pre',body),lyricsScrollTop=priorLyrics?priorLyrics.scrollTop:0;
   const openProvenance=new Set($$('.promptProvenance[open]',body).map(node=>node.dataset.provenance));
-  const restoreScroll=()=>{if(preserveScroll&&scroller)scroller.scrollTop=previousScroll;const prompt=$('.sceneSourcePrompt',body);if(prompt&&promptState){prompt.scrollTop=promptState.scrollTop;if(document.activeElement===prompt)prompt.setSelectionRange(promptState.start,promptState.end);}$$('.promptProvenance',body).forEach(node=>{if(openProvenance.has(node.dataset.provenance))node.open=true;});};
+  const restoreScroll=()=>{if(preserveScroll&&scroller)scroller.scrollTop=previousScroll;const prompt=$('.sceneSourcePrompt',body);if(prompt&&promptState)prompt.scrollTop=promptState.scrollTop;const lyrics=$('.musicInspectorLyrics pre',body);if(preserveScroll&&lyrics)lyrics.scrollTop=lyricsScrollTop;$$('.promptProvenance',body).forEach(node=>{if(openProvenance.has(node.dataset.provenance))node.open=true;});};
   body.className = '';
   body.innerHTML = '';
   if (!sel) { hint.textContent = ''; body.innerHTML = '<div class="insp-empty">Select a <b>clip</b> on the timeline to edit it, or a <b>media</b> item to see its details.</div>'; restoreScroll(); return; }
@@ -1337,6 +1438,20 @@ function renderInspector({preserveScroll=false}={}) {
   if (sel.type === 'scene') { renderSceneInsp(body, hint, sel.id); restoreScroll(); return; }
   renderClipInsp(body, hint, sel.id);
   restoreScroll();
+}
+
+async function copyInspectorText(value,button,label){
+  const text=String(value||'');
+  try{
+    if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(text);
+    else{const helper=document.createElement('textarea');helper.value=text;helper.setAttribute('readonly','');helper.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(helper);helper.select();if(!document.execCommand('copy'))throw new Error('Copy unavailable');helper.remove();}
+    const original=button.textContent;button.textContent='Copied';button.classList.add('copied');toast(label+' copied','ok');setTimeout(()=>{if(button.isConnected){button.textContent=original;button.classList.remove('copied');}},1200);
+  }catch(error){toast('Could not copy '+label.toLowerCase(),'err');}
+}
+function inspectorFieldHeading(labelText,value){
+  const heading=div('inspectorFieldHeading'),label=document.createElement('label'),button=document.createElement('button');
+  label.textContent=labelText;button.type='button';button.className='inspectorCopyBtn';button.textContent='Copy';button.setAttribute('aria-label','Copy '+labelText.toLowerCase());
+  button.addEventListener('click',()=>copyInspectorText(value,button,labelText));heading.append(label,button);return heading;
 }
 
 function inspectorNameField(value, save) {
@@ -1406,12 +1521,12 @@ function renderSceneInsp(body, hint, id) {
   if(isMusic&&sceneMedia&&sceneMedia.kind==='audio'){const preview=div('inspectorMediaPreview');const audio=document.createElement('audio');audio.src=mediaUrl(sceneMedia);audio.controls=true;audio.preload='metadata';preview.dataset.src=mediaUrl(sceneMedia);preview.appendChild(audio);body.appendChild(preview);}
 
   // Editable source plus immutable execution provenance.
-  const pf = div('field scenePromptField'); const pl = document.createElement('label'); pl.textContent = 'Source prompt'; pf.appendChild(pl);
+  const pf = div('field scenePromptField'); pf.appendChild(inspectorFieldHeading('Source prompt',sc.prompt||''));
   const pta = document.createElement('textarea'); pta.className = 'txt sceneSourcePrompt'; pta.value = sc.prompt || '';
   pta.addEventListener('change', () => { const v = pta.value.trim(); if (v !== (sc.prompt || '')) api('/api/scenes/' + sc.id, { method: 'PUT', body: { prompt: v } }).then(refresh).catch(e => toast(e.message, 'err')); });
   pf.appendChild(pta); body.appendChild(pf);
   const musicLyrics=isMusic?String((sc.params||{}).lyrics||'').trim():'';
-  if(musicLyrics&&musicLyrics!=='[Instrumental]'){const lyricsField=div('field musicInspectorLyrics'),lyricsLabel=document.createElement('label'),lyricsText=document.createElement('pre');lyricsLabel.textContent='Lyrics';lyricsText.textContent=musicLyrics;lyricsText.tabIndex=0;lyricsField.append(lyricsLabel,lyricsText);body.appendChild(lyricsField);}
+  if(musicLyrics&&musicLyrics!=='[Instrumental]'){const lyricsField=div('field musicInspectorLyrics'),lyricsText=document.createElement('pre');lyricsText.textContent=musicLyrics;lyricsText.tabIndex=0;lyricsField.append(inspectorFieldHeading('Lyrics',musicLyrics),lyricsText);body.appendChild(lyricsField);}
   const provenance=[['Refined prompt',sc.refined_prompt],['Final prompt sent to H3',sc.execution_prompt]];
   for(const [label,value] of provenance){if(!value||value===sc.prompt)continue;const details=document.createElement('details');details.className='field promptProvenance';details.dataset.provenance=label;const summary=document.createElement('summary');summary.textContent=label;const text=document.createElement('pre');text.textContent=value;details.append(summary,text);body.appendChild(details);}
   if(sc.skill_compilation&&sc.skill_compilation.id){const meta=div('d promptCompileMeta');meta.textContent='Skill: '+(sc.skill_compilation.name||sc.skill_compilation.id)+' · contract '+sc.skill_compilation.version+(sc.formatter_model?' · refinement '+sc.formatter_model:'');body.appendChild(meta);}
@@ -1550,7 +1665,7 @@ function renderClipInsp(body, hint, id) {
   clipPanel.appendChild(appliedEffectsField(c,activate,isAudio));
   clipPanel.appendChild(numField('Timeline start', c.start, 0, 9999, 0.01, v => putClip(c, { start: v })));
   clipPanel.appendChild(numField('Trim in', c.in, 0, m ? m.duration : 9999, 0.01, v => putClip(c, { in: Math.min(v, c.out - 0.05) })));
-  clipPanel.appendChild(numField('Trim out', c.out, 0, (m && m.kind === 'image') ? 60 : (m ? m.duration : 9999), 0.01, v => putClip(c, { out: Math.max(v, c.in + 0.05) })));
+  clipPanel.appendChild(numField('Trim out', c.out, 0, (m && m.kind === 'image') ? Number.POSITIVE_INFINITY : (m ? m.duration : 9999), 0.01, v => putClip(c, { out: Math.max(v, c.in + 0.05) })));
   if(!isAudio){
     panelById.transform.appendChild(zoomAmountField(c));
     panelById.transform.appendChild(positionField(c));
@@ -1582,7 +1697,12 @@ function renderClipInsp(body, hint, id) {
     }
     mf.appendChild(seg); panelById.animate.appendChild(mf);
   }
-  if (isVideo) panelById.animate.appendChild(transformKeyframesField(c));
+  if (isVideo) {
+    for(const lane of transformLanes(c))panelById.animate.appendChild(transformKeyframesField(lane));
+    const add=document.createElement('button');add.className='keyframeAddAt';add.textContent='+ Stack transform';
+    add.addEventListener('click',()=>{const id='transform-'+Date.now();putClip(c,{transformLayers:[...(c.transformLayers||[]),{id,name:'Transform '+(2+(c.transformLayers||[]).length),keyframes:{enabled:true,points:[{id:id+'-start',at:0,zoom:1,x:.5,y:.5},{id:id+'-end',at:1,zoom:1.25,x:.5,y:.5}]}}]});});
+    panelById.animate.appendChild(add);
+  }
   if (isVideo) {
     // transition
     const tf = div('field'); const lab = document.createElement('label'); lab.textContent = 'Add transition'; tf.appendChild(lab);
@@ -1590,7 +1710,7 @@ function renderClipInsp(body, hint, id) {
     for (const ty of types) {
       const b = document.createElement('button'); b.textContent = ty;
       b.addEventListener('click', () => {
-        const items=transitionItems(c).map(x=>({...x})),item={id:'tr-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),type:ty,edge:'start',dur:Math.min(.5,Math.max(.05,c.out-c.in)),enabled:true};items.push(item);playTime=c.start+item.dur/2;drawNow();selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:transitionPayload(items)});
+        const items=transitionItems(c).map(x=>({...x})),activeEdges=new Set(items.filter(x=>x.enabled!==false&&+x.dur>0).map(x=>x.edge||'start')),edge=activeEdges.has('start')&&!activeEdges.has('end')?'end':'start',item={id:'tr-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),type:ty,edge,dur:Math.min(.5,Math.max(.05,c.out-c.in)),enabled:true};items.push(item);playTime=c.start+(edge==='end'?Math.max(0,c.out-c.in-item.dur/2):item.dur/2);drawNow();selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:transitionPayload(items)});
       });
       seg.appendChild(b);
     }
@@ -1669,6 +1789,10 @@ async function detachAudio(c, on) {
 }
 
 async function putClip(c, fields, refreshUI=true) {
+  if(c._stackClip){
+    if('keyframes' in fields)c.keyframes=fields.keyframes;
+    fields={transformLayers:c._stackClip.transformLayers};c=c._stackClip;
+  }
   Object.assign(c, fields);
   clipMutationEpoch++;clipSavePending++;
   let saved=false;
@@ -1690,15 +1814,16 @@ async function deleteClip(c) {
 
 function numField(label, val, min, max, step, onInput) {
   const f = div('field'); const lab = document.createElement('label'); lab.textContent = label; f.appendChild(lab);
-  const row = div('row'); const inp = document.createElement('input'); inp.className = 'txt'; inp.type = 'number'; inp.step = step; inp.min = min; inp.max = max; inp.value = Number(val.toFixed(3));
-  inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (!isNaN(v)) onInput(clamp(v, min, max)); });
+  const row = div('row'); const inp = document.createElement('input'); inp.className = 'txt'; inp.type = 'number'; inp.step = step; inp.min = min; if(Number.isFinite(max))inp.max=max; inp.value = Number(val.toFixed(3));
+  let timer=0;const apply=()=>{clearTimeout(timer);const v=parseFloat(inp.value);if(!isNaN(v))onInput(clamp(v,min,max));};
+  inp.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(apply,140);});inp.addEventListener('change',apply);
   row.appendChild(inp); f.appendChild(row); return f;
 }
 
 function audioFadeField(c){
   const duration=Math.max(.05,c.out-c.in),fades={in:0,out:0,...(c.audioFade||{})},field=div('field audioFadeField'),title=document.createElement('label');title.textContent='Audio fades';field.appendChild(title);
   const note=document.createElement('small');note.className='audioFadeNote';note.textContent='Smooth the clip volume at its beginning and end.';field.appendChild(note);
-  const add=(key,label)=>{const wrap=div('precisionField'),head=div('precisionHead'),lab=document.createElement('label');lab.textContent=label;head.appendChild(lab);const value=div('precisionValue hasUnit'),number=document.createElement('input');number.type='number';number.className='precisionNumber';number.min=0;number.max=duration;number.step=.01;number.value=clamp(+fades[key]||0,0,duration).toFixed(2);const unit=document.createElement('span');unit.textContent='s';value.append(number,unit);head.appendChild(value);wrap.appendChild(head);const range=document.createElement('input');range.type='range';range.min=0;range.max=duration;range.step=.01;range.value=number.value;let raf=0;const redraw=()=>{raf=0;drawNow();renderTimeline();};const apply=(raw,save)=>{const v=clamp(+raw||0,0,duration);number.value=v.toFixed(2);range.value=String(v);fades[key]=v;c.audioFade={...fades};if(!raf)raf=requestAnimationFrame(redraw);if(save){if(raf){cancelAnimationFrame(raf);raf=0;}redraw();putClip(c,{audioFade:c.audioFade},false);}};range.addEventListener('input',()=>apply(range.value,false));range.addEventListener('change',()=>apply(range.value,true));number.addEventListener('change',()=>apply(number.value,true));wrap.appendChild(range);field.appendChild(wrap);};
+  const add=(key,label)=>{const wrap=div('precisionField'),head=div('precisionHead'),lab=document.createElement('label');lab.textContent=label;head.appendChild(lab);const value=div('precisionValue hasUnit'),number=document.createElement('input');number.type='number';number.className='precisionNumber';number.min=0;number.max=duration;number.step=.01;number.value=clamp(+fades[key]||0,0,duration).toFixed(2);const unit=document.createElement('span');unit.textContent='s';value.append(number,unit);head.appendChild(value);wrap.appendChild(head);const range=document.createElement('input');range.type='range';range.min=0;range.max=duration;range.step=.01;range.value=number.value;let raf=0,saveTimer=0;const redraw=()=>{raf=0;drawNow();renderTimeline();};const save=()=>{clearTimeout(saveTimer);putClip(c,{audioFade:{...c.audioFade}},false);};const apply=(raw,commit,format=true)=>{const v=clamp(+raw||0,0,duration);if(format)number.value=v.toFixed(2);range.value=String(v);fades[key]=v;c.audioFade={...fades};if(!raf)raf=requestAnimationFrame(redraw);if(commit){if(raf){cancelAnimationFrame(raf);raf=0;}redraw();save();}};range.addEventListener('input',()=>apply(range.value,false));range.addEventListener('change',()=>apply(range.value,true));number.addEventListener('input',()=>{if(number.value==='')return;apply(number.value,false,false);clearTimeout(saveTimer);saveTimer=setTimeout(save,140);});number.addEventListener('change',()=>apply(number.value,true));wrap.appendChild(range);field.appendChild(wrap);};
   add('in','Fade in');add('out','Fade out');return field;
 }
 function appendAudioFadeRail(el,c){
@@ -1722,14 +1847,14 @@ function precisionRangeField(label, val, min, max, step, onPreview, onCommit, un
   if(unitText){const unit=document.createElement('span');unit.textContent=unitText;valueWrap.appendChild(unit);}
   head.appendChild(lab); head.appendChild(valueWrap); f.appendChild(head);
   const r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = val; f.appendChild(r);
-  let current = +val,previewRaf=0,pending=current;
+  let current = +val,previewRaf=0,pending=current,numberCommitTimer=0;
   const runPreview=()=>{previewRaf=0;onPreview(pending);};
   const queuePreview=value=>{pending=value;if(!previewRaf)previewRaf=requestAnimationFrame(runPreview);};
   const flushPreview=()=>{if(previewRaf){cancelAnimationFrame(previewRaf);previewRaf=0;}pending=current;onPreview(current);};
   const precision=Math.max(0,(String(step).split('.')[1]||'').length);
   const normalized=raw=>{const parsed=parseFloat(raw);if(!isFinite(parsed))return null;const snapped=Math.round((clamp(parsed,min,max)-min)/step)*step+Number(min);return +clamp(snapped,min,max).toFixed(Math.max(precision,4));};
   const preview = raw => { const next=normalized(raw);if(next===null)return;current=next;r.value=String(current);n.value=current.toFixed(step < .1 ? 2 : 1);queuePreview(current); };
-  const commit=()=>{flushPreview();onCommit(current);inspectorControlActive=false;};
+  const commit=()=>{clearTimeout(numberCommitTimer);flushPreview();onCommit(current);inspectorControlActive=false;};
   const fromPointer=event=>{const rect=r.getBoundingClientRect(),ratio=clamp((event.clientX-rect.left)/Math.max(1,rect.width),0,1);preview(Number(min)+(Number(max)-Number(min))*ratio);};
   r.addEventListener('input', () => preview(r.value));
   r.addEventListener('change', commit);
@@ -1739,7 +1864,7 @@ function precisionRangeField(label, val, min, max, step, onPreview, onCommit, un
   r.addEventListener('pointercancel',()=>{inspectorControlActive=false;});
   r.addEventListener('keyup',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(event.key))flushPreview();});
   n.addEventListener('focus',()=>{inspectorControlActive=true;});
-  n.addEventListener('input', () => { const v = parseFloat(n.value); if (isFinite(v)) { current = clamp(v,min,max); r.value = current; queuePreview(current); } });
+  n.addEventListener('input', () => { const v = parseFloat(n.value); if (isFinite(v)) { current = clamp(v,min,max); r.value = current; queuePreview(current);clearTimeout(numberCommitTimer);numberCommitTimer=setTimeout(()=>{flushPreview();onCommit(current);},140); } });
   n.addEventListener('change', () => { preview(n.value);commit(); });
   n.addEventListener('blur',()=>{inspectorControlActive=false;});
   return f;
@@ -1754,13 +1879,13 @@ function zoomAmountField(c) {
   const unit = document.createElement('span'); unit.textContent = '%'; valueWrap.append(n,unit); head.append(lab,valueWrap); f.appendChild(head);
   const r = document.createElement('input'); r.type = 'range'; r.min = -90; r.max = 700; r.step = .1; r.value = toAmount(c.zoom);r.setAttribute('aria-label','Zoom size'); f.appendChild(r);
   const note = document.createElement('small'); note.className = 'zoomAmountNote'; note.textContent = 'Negative shrinks · 0% is original size · positive enlarges'; f.appendChild(note);
-  let amount = +r.value;
+  let amount = +r.value,numberCommitTimer=0;
   let redrawRaf=0;const redraw=()=>{redrawRaf=0;drawNow();};
   const preview = raw => { const parsed=parseFloat(raw); if(!Number.isFinite(parsed))return; amount=clamp(parsed,-90,700); r.value=amount; n.value=Math.round(amount); c.zoom=toZoom(amount);if(!redrawRaf)redrawRaf=requestAnimationFrame(redraw); };
   r.addEventListener('input',()=>preview(r.value));
   r.addEventListener('change',()=>{if(redrawRaf){cancelAnimationFrame(redrawRaf);redrawRaf=0;}drawNow();putClip(c,{zoom:toZoom(amount)},false);});
-  n.addEventListener('input',()=>{if(n.value!=='')preview(n.value);});
-  n.addEventListener('change',()=>{if(n.value==='')n.value=Math.round(amount);preview(n.value);putClip(c,{zoom:toZoom(amount)},false);});
+  n.addEventListener('input',()=>{if(n.value!==''){preview(n.value);clearTimeout(numberCommitTimer);numberCommitTimer=setTimeout(()=>putClip(c,{zoom:toZoom(amount)},false),140);}});
+  n.addEventListener('change',()=>{clearTimeout(numberCommitTimer);if(n.value==='')n.value=Math.round(amount);preview(n.value);putClip(c,{zoom:toZoom(amount)},false);});
   return f;
 }
 function positionField(c) {
@@ -1804,12 +1929,16 @@ function maskEffectField(c){
 function transformKeyframesField(c) {
   const f=div('field keyframeField'),stored=storedTransformPoints(c),enabled=stored.length>0&&c.keyframes.enabled!==false,top=div('keyframeHead transformKeyframeHead');top.innerHTML='<div><label>Transform animation</label><small>Animate zoom and position with editable points on the timeline.</small></div>';
   const toggle=document.createElement('button');toggle.className='transformToggle transitionToggle'+(enabled?' on':'');toggle.setAttribute('role','switch');toggle.setAttribute('aria-checked',enabled?'true':'false');toggle.setAttribute('aria-label','Enable transform animation');toggle.innerHTML='<span></span>';top.appendChild(toggle);f.appendChild(top);
+  if(c._layer){
+    top.querySelector('label').textContent=c._layer.name||'Transform';
+    const remove=document.createElement('button');remove.textContent='Remove layer';remove.addEventListener('click',()=>putClip(c._stackClip,{transformLayers:c._stackClip.transformLayers.filter(x=>x.id!==c._layer.id)}));top.appendChild(remove);
+  }
   toggle.addEventListener('click',()=>{let value;if(!stored.length)value={enabled:true,points:[{id:'kf-'+Date.now(),at:0,zoom:1,x:.5,y:.5},{id:'kf-'+(Date.now()+1),at:1,zoom:1.25,x:.5,y:.5}]};else value={...c.keyframes,enabled:!enabled,points:stored};if(value.enabled)c.motion={type:'none'};putClip(c,{keyframes:value,motion:c.motion});});
   if(!enabled)return f;
   const points=stored;c.keyframes={...c.keyframes,enabled:true,points};
   const addAtPlayhead = document.createElement('button'); addAtPlayhead.className='keyframeAddAt'; addAtPlayhead.textContent='◆ Add keyframe at playhead';
   addAtPlayhead.addEventListener('click',()=>{
-    const at=clamp((playTime-c.start)/Math.max(.05,c.out-c.in),0,1), current=clipMotion(c,at);
+    const at=clamp((playTime-c.start)/Math.max(.05,c.out-c.in),0,1), current=singleClipMotion(c,at*Math.max(.05,c.out-c.in));
     const id='kf-'+Date.now()+'-'+Math.random().toString(36).slice(2,7);
     const existing=transformPoints(c).map(p=>({...p}));
     const keyframes={enabled:true,points:[...existing,{id,at,zoom:current.zoom/Math.max(.1,c.zoom||1),x:current.center.x,y:current.center.y}].sort((a,b)=>a.at-b.at)};
@@ -1825,28 +1954,28 @@ function transformKeyframesField(c) {
     for (const [prop,label,min,max] of [['zoom','Zoom',.1,8],['x','Position X',0,1],['y','Position Y',0,1]]) {
       const wrap=div('keyframeControl'); wrap.innerHTML='<label>'+label+'</label>'; const inp=document.createElement('input'); inp.type='number'; inp.min=min; inp.max=max; inp.step=.01; inp.value=(+point[prop]).toFixed(2);
       inp.addEventListener('focus',()=>{inp.select();card.classList.add('editing');}); inp.addEventListener('blur',()=>card.classList.remove('editing'));
-      inp.addEventListener('input',()=>{if(inp.value==='')return;const v=clamp(+inp.value,min,max);if(Number.isFinite(v)){point[prop]=v;playTime=c.start+point.at*(c.out-c.in);drawNow();}}); inp.addEventListener('change',()=>{if(inp.value==='')inp.value=(+point[prop]).toFixed(2);putClip(c,{keyframes:c.keyframes});}); wrap.appendChild(inp); grid.appendChild(wrap);
+      let saveTimer=0;inp.addEventListener('input',()=>{if(inp.value==='')return;const v=clamp(+inp.value,min,max);if(Number.isFinite(v)){point[prop]=v;playTime=c.start+point.at*(c.out-c.in);drawNow();clearTimeout(saveTimer);saveTimer=setTimeout(()=>putClip(c,{keyframes:c.keyframes},false),140);}}); inp.addEventListener('change',()=>{if(inp.value==='')inp.value=(+point[prop]).toFixed(2);clearTimeout(saveTimer);putClip(c,{keyframes:c.keyframes},false);}); wrap.appendChild(inp); grid.appendChild(wrap);
     }
     const remove=document.createElement('button'); remove.className='keyframeRemove'; remove.textContent='×'; remove.title='Remove this keyframe'; remove.setAttribute('aria-label','Remove keyframe '+(index+1)); remove.addEventListener('click',()=>{if(selectedKeyframe&&selectedKeyframe.pointId===point.id)selectedKeyframe=null;c.keyframes.points=c.keyframes.points.filter(p=>p.id!==point.id);putClip(c,{keyframes:c.keyframes.points.length?c.keyframes:null});});
     card.appendChild(remove); card.appendChild(grid); list.appendChild(card);
   });
   f.appendChild(list);
-  if (revealSelectedKeyframe && selectedKeyframe && selectedKeyframe.clipId===c.id) { revealSelectedKeyframe=false; requestAnimationFrame(()=>{const active=f.querySelector('.keyframePoint.selected');if(active)active.scrollIntoView({block:'nearest'});}); }
+  if (revealSelectedKeyframe && selectedKeyframe && selectedKeyframe.clipId===c.id && points.some(p=>p.id===selectedKeyframe.pointId)) { revealSelectedKeyframe=false; requestAnimationFrame(()=>{const active=f.querySelector('.keyframePoint.selected');if(active)active.scrollIntoView({block:'nearest'});}); }
   return f;
 }
 function audioProcessingField(c){
-  const field=div('field'),label=document.createElement('label');label.textContent='Audio processing';field.appendChild(label);
+  const field=div('field'),label=document.createElement('label');label.textContent='Audio processing · export only';field.appendChild(label);
   const value={...(c.audioProcessing||{})};
   for(const [key,name] of [['voice','Voice filter'],['denoise','Noise reduction'],['compress','Compression'],['loudness','Loudness normalization']])field.appendChild(toggleRow(name,!!value[key],enabled=>putClip(c,{audioProcessing:{...value,[key]:enabled}})));
   return field;
 }
 function appliedEffectsField(c,activate,isAudio=false){
   const field=div('field appliedEffects');
-  const title=document.createElement('label');title.textContent='Applied effects';field.appendChild(title);
-  const note=div('effectStatus');note.textContent='Different types combine. Presets replace previous preset settings on the chosen clips.';field.appendChild(note);
+  const title=document.createElement('label');title.textContent='Effect stack';field.appendChild(title);
+  const note=div('effectStatus');note.textContent='All listed types combine on this clip. Restore removes Magia’s changes to that type; Undo steps back one application.';field.appendChild(note);
   const definitions=[
     ['transitions','Transitions','transitions',transitionItems(c).length>0,{transition:{items:[]}}],
-    ['transforms','Motion & reframing','transform',!!c.keyframes||(c.motion&&c.motion.type!=='none')||!!c.position&&(+c.position.x!==0||+c.position.y!==0)||!!c.zoom&&c.zoom!==1,{zoom:1,position:{x:0,y:0},motion:{type:'none'},keyframes:null}],
+    ['transforms','Motion & reframing',c.keyframes||(c.transformLayers||[]).length?'animate':'transform',!!c.keyframes||(c.transformLayers||[]).length>0||(c.motion&&c.motion.type!=='none')||!!c.position&&(+c.position.x!==0||+c.position.y!==0)||!!c.zoom&&c.zoom!==1,{zoom:1,position:{x:0,y:0},motion:{type:'none'},keyframes:null,transformLayers:[]}],
     ['color','Color','color',!!c.color,{color:null}],
     ['blur','Blur','effects',!!c.blur,{blur:null}],
     ['overlays','Mask / overlay layout','effects',!!c.mask,{mask:null}],
@@ -1879,7 +2008,7 @@ function transitionStackField(c) {
     const type=document.createElement('select');type.className='txt';type.setAttribute('aria-label','Transition type');for(const name of ['dissolve','fade','wipe','slide','circle']){const option=document.createElement('option');option.value=name;option.textContent=name;type.appendChild(option);}type.value=item.type;type.addEventListener('change',()=>{item.type=type.value;putClip(c,{transition:transitionPayload(items)});});card.appendChild(type);
     const remove=document.createElement('button');remove.className='keyframeRemove';remove.textContent='×';remove.title='Remove transition';remove.addEventListener('click',()=>{const next=items.filter(x=>x.id!==item.id);if(selectedTransition&&selectedTransition.transitionId===item.id)selectedTransition=null;putClip(c,{transition:transitionPayload(next)});});card.appendChild(remove);
     const edge=div('transitionEdge seg');['start','end'].forEach(value=>{const b=document.createElement('button');b.textContent=value==='start'?'Clip start':'Clip end';if((item.edge||'start')===value)b.classList.add('on');b.addEventListener('click',()=>{item.edge=value;c.transition=transitionPayload(items);selectedTransition={clipId:c.id,transitionId:item.id};putClip(c,{transition:c.transition});});edge.appendChild(b);});card.appendChild(edge);
-    const grid=div('keyframeGrid'),control=div('keyframeControl');control.innerHTML='<label>Duration (s)</label>';const input=document.createElement('input');input.type='number';input.min=0;input.max=clipDur;input.step=.01;input.value=clamp(+item.dur||0,0,clipDur).toFixed(2);input.addEventListener('focus',()=>{selectedTransition={clipId:c.id,transitionId:item.id};input.select();card.classList.add('selected');});input.addEventListener('input',()=>{if(input.value==='')return;const dur=clamp(+input.value,0,clipDur);if(Number.isFinite(dur)){item.dur=dur;c.transition=transitionPayload(items);playTime=c.start+((item.edge||'start')==='end'?clipDur-dur:dur);drawNow();renderTimeline();}});input.addEventListener('change',()=>putClip(c,{transition:transitionPayload(items)}));control.appendChild(input);grid.appendChild(control);
+    const grid=div('keyframeGrid'),control=div('keyframeControl');control.innerHTML='<label>Duration (s)</label>';const input=document.createElement('input');input.type='number';input.min=0;input.max=clipDur;input.step=.01;input.value=clamp(+item.dur||0,0,clipDur).toFixed(2);let saveTimer=0;const saveDuration=()=>{clearTimeout(saveTimer);putClip(c,{transition:transitionPayload(items)},false);};input.addEventListener('focus',()=>{selectedTransition={clipId:c.id,transitionId:item.id};input.select();card.classList.add('selected');});input.addEventListener('input',()=>{if(input.value==='')return;const dur=clamp(+input.value,0,clipDur);if(Number.isFinite(dur)){item.dur=dur;c.transition=transitionPayload(items);playTime=c.start+((item.edge||'start')==='end'?clipDur-dur:dur);drawNow();renderTimeline();clearTimeout(saveTimer);saveTimer=setTimeout(saveDuration,140);}});input.addEventListener('change',saveDuration);control.appendChild(input);grid.appendChild(control);
     const toggle=div('keyframeControl');toggle.innerHTML='<label>Enabled</label>';const tb=document.createElement('button');tb.className='transitionToggle'+(item.enabled===false?'':' on');tb.setAttribute('role','switch');tb.setAttribute('aria-checked',item.enabled===false?'false':'true');tb.setAttribute('aria-label','Enable '+item.type+' transition');tb.innerHTML='<span></span>';tb.addEventListener('click',()=>{item.enabled=item.enabled===false;tb.classList.toggle('on',item.enabled);tb.setAttribute('aria-checked',item.enabled?'true':'false');c.transition=transitionPayload(items);putClip(c,{transition:c.transition});});toggle.appendChild(tb);grid.appendChild(toggle);card.appendChild(grid);list.appendChild(card);
   });f.appendChild(list);return f;
 }
@@ -2462,7 +2591,7 @@ function renderGenerate() {
 
 function syncMusicModelCard(){const runtime=musicRuntime(),entry=(typeof MODEL_CATALOG!=='undefined'?MODEL_CATALOG:[]).find(item=>item.id==='music');if(!entry)return;
   entry.available=musicReady();
-  entry.detail=runtime?(runtime.ready?('Song composer · '+(runtime.device||'local runtime')+' · description, lyrics, plan, score, seed'):('Not ready · '(((runtime.missing||[]).join(' · '))||'no runtime selected'))):'Music generation · runtime not detected';
+  entry.detail=runtime?(runtime.ready?('Song composer · '+(runtime.device||'local runtime')+' · description, lyrics, plan, score, seed'):('Not ready · '+(((runtime.missing||[]).join(' · '))||'no runtime selected'))):'Music generation · runtime not detected';
   entry.note=runtime&&!runtime.ready?'Install YuE 2 in Models':'';}
 function applyGenerationType() {
   syncMusicModelCard();
@@ -3441,7 +3570,7 @@ function renderGallery() {
     meta.appendChild(name); meta.appendChild(date);
     card.appendChild(meta);
     // single, quiet destructive affordance; project name is editable inside the project
-    const del = document.createElement('button'); del.className = 'projectDelete'; del.textContent = '×'; del.title = 'Delete project'; del.setAttribute('aria-label', 'Delete ' + (p.name || 'project'));
+    const del = document.createElement('button'); del.className = 'projectDelete'; del.innerHTML = '<span aria-hidden="true">×</span>'; del.title = 'Delete project'; del.setAttribute('aria-label', 'Delete ' + (p.name || 'project'));
     del.addEventListener('click', (e) => { e.stopPropagation(); deleteProject(p); });
     card.appendChild(del);
     card.addEventListener('click', () => openProject(p));
@@ -3514,11 +3643,13 @@ function splitAtPlayhead() {
   const newIn = target.in + localIn;
   // left keeps [in, newIn], right is a new clip [newIn, out]
   const leftOut = target.out,originalDuration=Math.max(.05,leftOut-target.in),splitRatio=clamp(localIn/originalDuration,.0001,.9999),[leftKeyframes,rightKeyframes]=splitTransformKeyframes(target,splitRatio),clone=value=>value==null?value:JSON.parse(JSON.stringify(value));
-  target.out = newIn;target.keyframes=leftKeyframes;
+  const leftLayers=[],rightLayers=[];
+  for(const layer of target.transformLayers||[]){const [left,right]=splitTransformKeyframes(transformLayerClip(target,layer),splitRatio);leftLayers.push({...clone(layer),keyframes:left});rightLayers.push({...clone(layer),keyframes:right});}
+  target.out = newIn;target.keyframes=leftKeyframes;target.transformLayers=leftLayers;
   const right = { id: null, mediaId: target.mediaId, start: playTime, in: newIn, out: leftOut,
-    zoom: target.zoom,position:clone(target.position),motion:clone(target.motion),keyframes:rightKeyframes,color:clone(target.color),audioFade:clone(target.audioFade),audioProcessing:clone(target.audioProcessing),volume:target.volume,transition:clone(target.transition)||{type:'cut',dur:0},muted:target.muted,detached:target.detached };
-  api('/api/clips/' + target.id, { method: 'PUT', body: { out: target.out,keyframes:leftKeyframes } })
-    .then(() => api('/api/clips', { method: 'POST', body: { trackId: tr.id, mediaId: right.mediaId, start: right.start, in: right.in, out: right.out, zoom: right.zoom,position:right.position,motion:right.motion,keyframes:right.keyframes,color:right.color,audioFade:right.audioFade,audioProcessing:right.audioProcessing,volume:right.volume,transition:right.transition,muted:right.muted,detached:right.detached } }))
+    zoom: target.zoom,position:clone(target.position),motion:clone(target.motion),keyframes:rightKeyframes,transformLayers:rightLayers,blur:clone(target.blur),mask:clone(target.mask),color:clone(target.color),audioFade:clone(target.audioFade),audioProcessing:clone(target.audioProcessing),volume:target.volume,transition:clone(target.transition)||{type:'cut',dur:0},muted:target.muted,detached:target.detached };
+  api('/api/clips/' + target.id, { method: 'PUT', body: { out: target.out,keyframes:leftKeyframes,transformLayers:leftLayers } })
+    .then(() => api('/api/clips', { method: 'POST', body: { trackId: tr.id, mediaId: right.mediaId, start: right.start, in: right.in, out: right.out, zoom: right.zoom,position:right.position,motion:right.motion,keyframes:right.keyframes,transformLayers:right.transformLayers,blur:right.blur,mask:right.mask,color:right.color,audioFade:right.audioFade,audioProcessing:right.audioProcessing,volume:right.volume,transition:right.transition,muted:right.muted,detached:right.detached } }))
     .then(() => { toast('Split clip', 'ok'); refresh(); })
     .catch(e => toast(e.message, 'err'));
 }
@@ -3539,14 +3670,20 @@ function freezeAtPlayhead() {
 }
 
 function extractFrameAtPlayhead() {
+  // Extraction is a snapshot operation. Stop the transport first so repeated
+  // clicks use the frame currently visible under the playhead instead of
+  // sampling slightly later playback positions while the request is sent.
+  if (playing) pause();
+  const captureTime = playTime;
+  drawNow();
   // find the base-track clip under the playhead and pull that exact frame
   const vtracks = state.tracks.filter(t => t.kind === 'video');
   const base = vtracks.slice().reverse().find(t => t.clips.length);
   if (!base) { toast('No video clip on the timeline', 'err'); return; }
   let target = null;
-  for (const c of base.clips) { const d = c.out - c.in; if (playTime >= c.start && playTime < c.start + d) { target = c; break; } }
+  for (const c of base.clips) { const d = c.out - c.in; if (captureTime >= c.start && captureTime < c.start + d) { target = c; break; } }
   if (!target) { toast('No clip under the playhead', 'err'); return; }
-  const at = target.in + (playTime - target.start);
+  const at = target.in + (captureTime - target.start);
   api('/api/frame', { method: 'POST', body: { mediaId: target.mediaId, at } })
     .then(m => { toast('Extracted frame at ' + at.toFixed(2) + 's', 'ok'); refresh(); })
     .catch(e => toast(e.message, 'err'));
@@ -3557,9 +3694,18 @@ function syncZoomUi() {
   const v = $('#zoomVal'); if (v) { const zoom=pxPerSec/100; v.textContent=(zoom<0.1?zoom.toFixed(2):zoom.toFixed(1))+'×'; }
 }
 function setZoom(px) {
+  const scroll=$('#tlScroll'),oldPx=pxPerSec;
+  // Preserve the playhead's viewport position while the timeline scale
+  // changes. This makes zoom expand/contract around the frame being edited
+  // instead of around the timeline's left edge.
+  const playheadScreenX=scroll?LANE_OFFSET+playTime*oldPx-scroll.scrollLeft:null;
   pxPerSec = clamp(+px || 100, 5, 400);
   syncZoomUi();
   renderTimeline();
+  if(scroll&&Number.isFinite(playheadScreenX)){
+    const desired=LANE_OFFSET+playTime*pxPerSec-playheadScreenX;
+    scroll.scrollLeft=clamp(desired,0,Math.max(0,scroll.scrollWidth-scroll.clientWidth));
+  }
   saveProjectLayout();
 }
 function zoomTimeline(dir) {
@@ -3584,21 +3730,23 @@ const TIMELINE_MAGIA_EXAMPLES={
   cinematic:{label:'Cinematic restraint',text:'Slow fades, gentle camera drift, controlled contrast, sparse overlays and longer audio tails.'},
   'audio-first':{label:'Audio-first clarity',text:'Dialogue-friendly timing, minimal motion, simple dissolves and the smoothest audio edges.'}
 };
-function selectTimelineMagiaRecipe(id,plan=true){timelineMagiaRecipe=TIMELINE_MAGIA_EXAMPLES[id]?id:'subtle';$$('[data-magia-recipe]').forEach(button=>button.classList.toggle('on',button.dataset.magiaRecipe===timelineMagiaRecipe));const example=TIMELINE_MAGIA_EXAMPLES[timelineMagiaRecipe];$('#timelineMagiaExamples').innerHTML='<b>'+esc(example.label)+'</b><p>'+esc(example.text)+'</p>';if(plan)scheduleTimelineMagiaPlan();}
-function renderTimelineMagiaApplied(){const applied=(state||{}).timelineMagia||{};const host=$('#timelineMagiaApplied');if(!applied.recipe_id){host.hidden=true;host.textContent='';return;}const recipe=TIMELINE_MAGIA_EXAMPLES[applied.recipe_id];host.hidden=false;host.textContent='Currently applied: '+(recipe?recipe.label:applied.profile||applied.recipe_id);}
+function selectTimelineMagiaRecipe(id,plan=true){timelineMagiaRecipe=TIMELINE_MAGIA_EXAMPLES[id]?id:'subtle';$('#timelineMagiaRecipe').value=timelineMagiaRecipe;$$('[data-magia-recipe]').forEach(button=>button.classList.toggle('on',button.dataset.magiaRecipe===timelineMagiaRecipe));const example=TIMELINE_MAGIA_EXAMPLES[timelineMagiaRecipe];$('#timelineMagiaExamples').innerHTML='<b>'+esc(example.label)+'</b><p>'+esc(example.text)+'</p>';if(plan)scheduleTimelineMagiaPlan();}
 function timelineMagiaOptions(){
   return Object.fromEntries($$('[data-timeline-magia-option]').map(input=>[input.dataset.timelineMagiaOption,input.checked]));
 }
-function timelineMagiaSelectedClip(){const c=sel&&sel.type==='clip'?findClip(sel.id):null;return c&&trackOfClip(c).kind==='video'?c:null;}
+function timelineMagiaSelectedClip(){const c=sel&&sel.type==='clip'?findClip(sel.id):null;return c&&['video','audio'].includes(trackOfClip(c).kind)?c:null;}
 function timelineMagiaPayload(useAI=false){
-  return {seed:timelineMagiaSeed,recipe_id:timelineMagiaRecipe,direction:$('#timelineMagiaDirection').value.trim(),scope:$('#timelineMagiaScope').value,
+  return {mode:$('#timelineMagiaMode').value,seed:timelineMagiaSeed,recipe_id:timelineMagiaRecipe,direction:$('#timelineMagiaDirection').value.trim(),scope:$('#timelineMagiaScope').value,
     selected_clip_id:(timelineMagiaSelectedClip()||{}).id||'',options:timelineMagiaOptions(),use_ai:useAI};
 }
 function renderTimelineMagiaPlan(plan){
   const host=$('#timelineMagiaPlan');
+  const selectedCount=Object.values(timelineMagiaOptions()).filter(Boolean).length;
+  $('#magiaOptionsCount').textContent=selectedCount?(selectedCount+' selected'):'None selected';
+  $('#timelineMagiaApply').disabled=timelineMagiaPlanning||!selectedCount;
   if(timelineMagiaPlanning){host.innerHTML='<div class="timelineMagiaLoading">'+(timelineMagiaInterpreting?'Interpreting direction…':'Building edit…')+'</div>';return;}
   if(timelineMagiaError){host.innerHTML='<div class="timelineMagiaEmpty">Preview unavailable. Apply to retry.</div>';return;}
-  if(!plan||!(plan.updates||[]).length){const any=Object.values(timelineMagiaOptions()).some(Boolean);host.innerHTML='<div class="timelineMagiaEmpty">'+(any?'No compatible changes for this selection.':'Apply to remove previous Magia effects.')+'</div>';return;}
+  if(!plan||!(plan.updates||[]).length){const any=Object.values(timelineMagiaOptions()).some(Boolean);host.innerHTML='<div class="timelineMagiaEmpty">'+(any?'No compatible changes for this selection.':($('#timelineMagiaMode').value==='stack'?'Choose at least one effect to add.':'Apply to remove previous Magia effects.'))+'</div>';return;}
   const summary=plan.summary||{},facts=[];
   if(summary.transitions)facts.push(summary.transitions+' transition'+(summary.transitions===1?'':'s'));
   if(summary.transforms)facts.push(summary.transforms+' motion edit'+(summary.transforms===1?'':'s'));
@@ -3614,17 +3762,18 @@ function renderTimelineMagiaPlan(plan){
 function setTimelineMagiaBusy(busy){
   timelineMagiaPlanning=busy;
   $('#timelineMagiaCleanup').disabled=busy;
-  $('#timelineMagiaApply').disabled=false;
+  $('#timelineMagiaApply').disabled=busy||!Object.values(timelineMagiaOptions()).some(Boolean);
   renderTimelineMagiaPlan(timelineMagiaPlan);
 }
 async function cleanUpTimeline(){
   const button=$('#timelineMagiaCleanup'),label=button.textContent;button.disabled=true;button.textContent='Cleaning…';
-  try{const result=await api('/api/timeline/cleanup',{method:'POST'});await refresh(true);renderTimelineMagiaApplied();scheduleTimelineMagiaPlan();
+  try{const result=await api('/api/timeline/cleanup',{method:'POST'});await refresh(true);scheduleTimelineMagiaPlan();
     const parts=[];if(result.shifted_by>0)parts.push('moved the edit '+result.shifted_by.toFixed(2)+'s to 0:00');if(result.overlaps_repaired)parts.push('repaired '+result.overlaps_repaired+' overlap'+(result.overlaps_repaired===1?'':'s'));
     toast(parts.length?'Timeline cleaned up · '+parts.join(' and '):'Timeline is already clean','ok');
   }catch(error){toast(error.message,'err');}finally{button.textContent=label;button.disabled=false;}
 }
 async function requestTimelineMagiaPlan(remix=false,useAI=false){
+  const requestId=++timelineMagiaRequest;
   if(remix||!timelineMagiaSeed)timelineMagiaSeed=(Date.now()+Math.floor(Math.random()*100000))%2147483647;
   if($('#timelineMagiaScope').value==='selected'&&!timelineMagiaSelectedClip()){
     $('#timelineMagiaScope').value='timeline';
@@ -3633,38 +3782,41 @@ async function requestTimelineMagiaPlan(remix=false,useAI=false){
   timelineMagiaError='';
   timelineMagiaInterpreting=useAI&&!!$('#timelineMagiaDirection').value.trim();
   setTimelineMagiaBusy(true);
-  try{const requested=timelineMagiaRecipe;timelineMagiaPlan=await api('/api/timeline/magia/plan',{method:'POST',body:timelineMagiaPayload(useAI)});if(timelineMagiaPlan.recipe_id!==requested)throw new Error('Restart OpenMagia to activate the selected Magia recipes.');return timelineMagiaPlan;}
-  catch(error){timelineMagiaPlan=null;timelineMagiaError=error.status===404?'Restart OpenMagia to load timeline Magia.':error.message;toast(timelineMagiaError,'err');return null;}
-  finally{timelineMagiaInterpreting=false;setTimelineMagiaBusy(false);}
+  try{const requested=timelineMagiaRecipe;const result=await api('/api/timeline/magia/plan',{method:'POST',body:timelineMagiaPayload(useAI)});if(requestId!==timelineMagiaRequest)return null;timelineMagiaPlan=result;if(timelineMagiaPlan.recipe_id!==requested)throw new Error('Restart OpenMagia to activate the selected Magia recipes.');return timelineMagiaPlan;}
+  catch(error){if(requestId!==timelineMagiaRequest)return null;timelineMagiaPlan=null;timelineMagiaError=error.status===404?'Restart OpenMagia to load timeline Magia.':error.message;toast(timelineMagiaError,'err');return null;}
+  finally{if(requestId===timelineMagiaRequest){timelineMagiaInterpreting=false;setTimelineMagiaBusy(false);}}
 }
 function scheduleTimelineMagiaPlan(){
+  ++timelineMagiaRequest;timelineMagiaPlan=null;
   clearTimeout(timelineMagiaTimer);
+  setTimelineMagiaBusy(true);
   timelineMagiaTimer=setTimeout(()=>requestTimelineMagiaPlan(false),180);
 }
 function openTimelineMagia(){
   const selected=timelineMagiaSelectedClip();
   const selectedOption=$('#timelineMagiaScope option[value="selected"]');
-  selectedOption.textContent=selected?'Selected clip · '+((mediaById(selected.mediaId)||{}).name||selected.id)+' on '+trackOfClip(selected).name:'Selected clip';
+  selectedOption.textContent='Selected clip';
   selectedOption.disabled=!selected;
   const applied=(state||{}).timelineMagia||{};
-  $('#timelineMagiaScope').value='timeline';
-  $('#timelineMagiaDirection').value=applied.direction||'';
-  const appliedOptions=applied.options||{};
-  $$('[data-timeline-magia-option]').forEach(input=>{if(Object.prototype.hasOwnProperty.call(appliedOptions,input.dataset.timelineMagiaOption))input.checked=!!appliedOptions[input.dataset.timelineMagiaOption];});
+  $('#timelineMagiaScope').value=selected?'selected':'timeline';
+  $('#timelineMagiaScopeHint').textContent=selected?(((mediaById(selected.mediaId)||{}).name||selected.id)+' · '+trackOfClip(selected).name):'Select a timeline clip to target only that clip.';
+  $('#timelineMagiaDirection').value='';
+  $$('[data-timeline-magia-option]').forEach(input=>{input.checked=false;});
   selectTimelineMagiaRecipe(applied.recipe_id||timelineMagiaRecipe||'subtle',false);
-  renderTimelineMagiaApplied();
   timelineMagiaPlan=null;timelineMagiaError='';timelineMagiaSeed=0;
   const sheet=$('#timelineMagiaSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');
   requestAnimationFrame(()=>$('#timelineMagiaDirection').focus({preventScroll:true}));
   requestTimelineMagiaPlan(true);
 }
 function closeTimelineMagia(){
+  ++timelineMagiaRequest;timelineMagiaPlanning=false;
   clearTimeout(timelineMagiaTimer);
   const sheet=$('#timelineMagiaSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');
 }
 async function applyTimelineMagia(){
   if(timelineMagiaPlanning)return toast('Magia is still preparing the edit','warn');
   const enabled=Object.entries(timelineMagiaOptions()).filter(([,value])=>value).map(([key])=>key);
+  if(!enabled.length)return toast('Select at least one effect','warn');
   if($('#timelineMagiaDirection').value.trim()){
     const interpreted=await requestTimelineMagiaPlan(false,true);
     if(!interpreted)return;
@@ -3673,7 +3825,7 @@ async function applyTimelineMagia(){
     if(!planned)return;
   }
   if(!(timelineMagiaPlan.updates||[]).length){
-    if(enabled.length===1&&enabled[0]==='transitions')return toast('Transitions need at least two clips on the same video track','err');
+    if(enabled.length===1&&enabled[0]==='transitions')return toast('No new transitions to add; this clip already has its edge effects','err');
     if(enabled.length)return toast('No compatible effects are available for this selection','err');
   }
   const button=$('#timelineMagiaApply'),label=button.textContent;button.disabled=true;button.textContent='Applying…';
@@ -3986,8 +4138,9 @@ function skillPreviewMarkup(skill,variant='card'){
   if(skill.type==='music')return variant==='detail'?'<div class="skillStylePreview musicSkillArt"><span>'+esc(skill.icon||'♫')+'</span><small>Music direction for YuE 2</small></div>':'<span class="musicSkillGlyph">'+esc(skill.icon||'♫')+'</span>';
   const id=esc(skill.id);
   if(variant!=='detail')return '<span class="skillPreviewPair '+esc(variant)+'">'+
-    '<img src="/assets/skill-previews/'+id+'.jpg" alt="" loading="lazy">'+
-    '<img src="/assets/skill-previews/'+id+'-reels-2.jpg" alt="" loading="lazy">'+
+    (variant==='card'
+      ? '<video src="/assets/skill-previews/'+id+'.mp4" poster="/assets/skill-previews/'+id+'.jpg" muted loop autoplay playsinline preload="metadata"></video><video src="/assets/skill-previews/'+id+'-reels-2.mp4" poster="/assets/skill-previews/'+id+'-reels-2.jpg" muted loop autoplay playsinline preload="metadata"></video>'
+      : '<img src="/assets/skill-previews/'+id+'.jpg" alt="" loading="lazy"><img src="/assets/skill-previews/'+id+'-reels-2.jpg" alt="" loading="lazy">')+
   '</span>';
   const controls=' controls';
   return '<span class="skillPreviewPair '+esc(variant)+'">'+
@@ -4089,13 +4242,13 @@ function renderAll() {
 }
 /* ---------------- events ---------------- */
 /* ---------------- OpenMagia plugin host ---------------- */
-const PLUGIN_PERMISSION_COPY={'project.read':['Read project','Read active project metadata.'],'project.write':['Change project','Update project settings through reviewed actions.'],'media.read':['Read media','Read media metadata, folders, and status.'],'media.write':['Change media','Create, rename, move, or remove media.'],'timeline.read':['Read timeline','Read tracks, clips, selection, and playhead.'],'timeline.write':['Change timeline','Add and edit tracks and clips.'],'generation.read':['Read generations','Read queued, running, completed, and failed scenes.'],'generation.create':['Create generations','Submit or cancel generation jobs.'],'generation.events':['Generation events','Receive queued, progress, completed, failed, and cancelled updates.'],'notifications.email':['Send email','Send through the configured SMTP account.'],'notifications.imessage':['Send iMessage','Ask macOS Messages to send to the configured recipient.'],'storage':['Plugin storage','Save this plugin’s settings locally.']};
+const PLUGIN_PERMISSION_COPY={'output.open':['Open program output','Open a clean live picture window for OBS capture. Audio stays in the editor browser.'],'project.read':['Read project','Read active project metadata.'],'project.write':['Change project','Update project settings through reviewed actions.'],'media.read':['Read media','Read media metadata, folders, and status.'],'media.write':['Change media','Create, rename, move, or remove media.'],'timeline.read':['Read timeline','Read tracks, clips, selection, and playhead.'],'timeline.write':['Change timeline','Add and edit tracks and clips.'],'generation.read':['Read generations','Read queued, running, completed, and failed scenes.'],'generation.create':['Create generations','Submit or cancel generation jobs.'],'generation.events':['Generation events','Receive queued, progress, completed, failed, and cancelled updates.'],'notifications.email':['Send email','Send through the configured SMTP account.'],'notifications.imessage':['Send iMessage','Ask macOS Messages to send to the configured recipient.'],'storage':['Plugin storage','Save this plugin’s settings locally.']};
 function pluginAssetUrl(p,f){return p&&p[f]?'/api/plugins/'+encodeURIComponent(p.id)+'/assets/'+String(p[f]).split('/').map(encodeURIComponent).join('/'):'';}
-async function loadPluginCatalog(){const r=await api('/api/plugins');pluginCatalog=r.plugins||[];return pluginCatalog;}
+async function loadPluginCatalog(){const r=await api('/api/plugins');pluginCatalog=r.plugins||[];bundledPlugins=r.bundled||[];return pluginCatalog;}
 function closePluginManager(){const s=$('#pluginSheet');s.classList.remove('on');s.setAttribute('aria-hidden','true');}
 async function openPluginManager(){const s=$('#pluginSheet');s.classList.add('on');s.setAttribute('aria-hidden','false');$('#pluginSheetBody').innerHTML='<div class="pluginEmpty"><h3>Loading plugins…</h3></div>';try{await loadPluginCatalog();renderPluginManager();}catch(e){toast(e.message,'err');}}
 function pluginCardHtml(p){const cover=pluginAssetUrl(p,'cover');return '<article class="pluginCard" data-plugin="'+esc(p.id||'')+'">'+(cover?'<img class="pluginCover" src="'+esc(cover)+'" alt="">':'<div class="pluginCover"></div>')+'<div class="pluginCardBody"><div><h3>'+esc(p.name||p.id||'Missing plugin')+'</h3><p>'+esc(p.error||p.description||'')+'</p><div class="pluginMeta"><span>v'+esc(p.version||'—')+'</span><span>'+(p.enabled?'Enabled':'Disabled')+'</span>'+(p.missing?'<span>Missing files</span>':'')+'</div></div><div class="pluginCardActions">'+(!p.missing?'<button class="btn ghost" data-plugin-configure>Manage</button>'+(p.enabled?'<button class="btn primary" data-plugin-run>Open</button>':''):'')+'</div></div></article>';}
-function renderPluginManager(){const body=$('#pluginSheetBody'),foot=$('#pluginSheetFoot');foot.innerHTML='';if(pluginTab==='store'){body.innerHTML='<div class="pluginEmpty"><div><h3>Plugin Store · Coming soon</h3><p>Browse reviewed community plugins in a future release. Developers can load unpacked plugins today.</p></div></div>';return;}if(pluginTab==='develop'){body.innerHTML='<div class="pluginLoadForm"><div><h3>Load unpacked plugin</h3><p>Enter a plugin folder or its <code>openmagia-plugin.json</code> path. Source stays in its independent repository.</p></div><label>Plugin path<input id="pluginPath" class="txt" placeholder="/absolute/path/to/plugin"></label><div class="pluginDevActions"><button id="pluginLogsBtn" class="btn ghost">View logs</button><button id="pluginLoadBtn" class="btn primary">Load plugin</button></div></div>';$('#pluginLoadBtn').addEventListener('click',async()=>{const path=$('#pluginPath').value.trim();if(!path)return toast('Enter a plugin folder or manifest path.','err');try{const loaded=await api('/api/plugins/load',{method:'POST',body:{path}});await loadPluginCatalog();pluginTab='installed';$$('[data-plugin-tab]').forEach(x=>x.classList.toggle('on',x.dataset.pluginTab==='installed'));renderPluginPermissionReview(loaded.id);}catch(e){toast(e.message,'err');}});$('#pluginLogsBtn').addEventListener('click',renderPluginLogs);return;}body.innerHTML=pluginCatalog.length?'<div class="pluginGrid">'+pluginCatalog.map(pluginCardHtml).join('')+'</div>':'<div class="pluginEmpty"><div><h3>No plugins loaded</h3><p>Open Development and load an unpacked plugin from its repository.</p></div></div>';$$('[data-plugin-configure]',body).forEach(b=>b.addEventListener('click',()=>renderPluginPermissionReview(b.closest('[data-plugin]').dataset.plugin)));$$('[data-plugin-run]',body).forEach(b=>b.addEventListener('click',()=>runPlugin(b.closest('[data-plugin]').dataset.plugin)));}
+function renderPluginManager(){const body=$('#pluginSheetBody'),foot=$('#pluginSheetFoot');foot.innerHTML='';if(pluginTab==='store'){body.innerHTML='<div class="pluginEmpty"><div><h3>Plugin Store · Coming soon</h3><p>Browse reviewed community plugins in a future release. Developers can load unpacked plugins today.</p></div></div>';return;}if(pluginTab==='develop'){body.innerHTML='<div class="pluginLoadForm"><div><h3>Load unpacked plugin</h3><button class="btn ghost" id="loadObsPlugin">Load bundled OBS Output</button><p>Enter a plugin folder or its <code>openmagia-plugin.json</code> path. Source stays in its independent repository.</p></div><label>Plugin path<input id="pluginPath" class="txt" placeholder="/absolute/path/to/plugin"></label><div class="pluginDevActions"><button id="pluginLogsBtn" class="btn ghost">View logs</button><button id="pluginLoadBtn" class="btn primary">Load plugin</button></div></div>';$('#loadObsPlugin').addEventListener('click',()=>{const plugin=bundledPlugins.find(p=>p.name==='OBS Output');if(!plugin)return toast('Restart OpenMagia to load the bundled OBS plugin.','warn');$('#pluginPath').value=plugin.path;$('#pluginLoadBtn').click();});$('#pluginLoadBtn').addEventListener('click',async()=>{const path=$('#pluginPath').value.trim();if(!path)return toast('Enter a plugin folder or manifest path.','err');try{const loaded=await api('/api/plugins/load',{method:'POST',body:{path}});await loadPluginCatalog();pluginTab='installed';$$('[data-plugin-tab]').forEach(x=>x.classList.toggle('on',x.dataset.pluginTab==='installed'));renderPluginPermissionReview(loaded.id);}catch(e){toast(e.message,'err');}});$('#pluginLogsBtn').addEventListener('click',renderPluginLogs);return;}body.innerHTML=pluginCatalog.length?'<div class="pluginGrid">'+pluginCatalog.map(pluginCardHtml).join('')+'</div>':'<div class="pluginEmpty"><div><h3>No plugins loaded</h3><p>Open Development and load an unpacked plugin from its repository.</p></div></div>';$$('[data-plugin-configure]',body).forEach(b=>b.addEventListener('click',()=>renderPluginPermissionReview(b.closest('[data-plugin]').dataset.plugin)));$$('[data-plugin-run]',body).forEach(b=>b.addEventListener('click',()=>runPlugin(b.closest('[data-plugin]').dataset.plugin)));}
 function renderPluginPermissionReview(id){const p=pluginCatalog.find(x=>x.id===id);if(!p)return renderPluginManager();const permissions=p.permissions||[],grants=new Set(p.grants||[]),body=$('#pluginSheetBody');body.innerHTML='<div class="pluginLoadForm"><div><button id="pluginReviewBack" class="sheetFolderBack">← Installed</button><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p></div><div><h3>Permissions</h3><p>Approve only what this plugin needs. Disabled capabilities remain outside its sandbox.</p></div><div class="pluginPermissionList">'+permissions.map(permission=>{const copy=PLUGIN_PERMISSION_COPY[permission]||[permission,''];return '<label class="pluginPermission"><input type="checkbox" value="'+esc(permission)+'" '+(grants.has(permission)?'checked':'')+'><span><strong>'+esc(copy[0])+'</strong><small>'+esc(copy[1])+'</small></span></label>';}).join('')+'</div><div class="pluginDevActions"><button id="pluginRemove" class="btn danger">Remove</button><button id="pluginSavePermissions" class="btn primary">'+(p.enabled?'Save permissions':'Approve and enable')+'</button></div></div>';$('#pluginReviewBack').addEventListener('click',renderPluginManager);$('#pluginRemove').addEventListener('click',async()=>{if(!confirm('Remove this plugin from OpenMagia? Its source folder will not be deleted.'))return;await api('/api/plugins/'+encodeURIComponent(id),{method:'DELETE'});await loadPluginCatalog();renderPluginManager();syncPluginBackgrounds();});$('#pluginSavePermissions').addEventListener('click',async()=>{const selected=$$('.pluginPermission input:checked',body).map(i=>i.value);if(selected.length!==permissions.length)return toast('Approve every requested permission to enable this plugin.','err');try{await api('/api/plugins/'+encodeURIComponent(id),{method:'POST',body:{enabled:true,grants:selected}});await loadPluginCatalog();renderPluginManager();syncPluginBackgrounds();toast(p.name+' enabled','ok');}catch(e){toast(e.message,'err');}});}
 async function renderPluginLogs(){const body=$('#pluginSheetBody');body.innerHTML='<div class="pluginLoadForm"><button id="pluginLogsBack" class="sheetFolderBack">← Development</button><h3>Plugin log</h3><pre class="pluginLogs">Loading…</pre></div>';$('#pluginLogsBack').addEventListener('click',renderPluginManager);try{const r=await api('/api/plugins/logs');$('.pluginLogs',body).textContent=(r.logs||[]).map(x=>new Date(x.time*1000).toLocaleString()+'  '+String(x.level||'info').toUpperCase()+'  '+x.pluginId+'\n'+x.message).join('\n\n')||'No plugin events yet.';}catch(e){$('.pluginLogs',body).textContent=e.message;}}
 function closePluginRunner(){const r=$('#pluginRunner');r.classList.remove('on');r.setAttribute('aria-hidden','true');$('#pluginFrame').src='about:blank';activePlugin=null;}
@@ -4152,12 +4305,12 @@ function publishPluginGenerationEvents(){
   }else if(stillPending&&pluginRunTally.startedAt===null)pluginRunTally.startedAt=Date.now();
   pluginGenerationSnapshot=current;
 }
-window.addEventListener('message',async event=>{const rf=$('#pluginFrame'),background=[...pluginBackgroundFrames.values()],frame=event.source===rf.contentWindow?rf:background.find(x=>x.contentWindow===event.source);if(!frame)return;const p=frame===rf?activePlugin:pluginCatalog.find(x=>x.id===frame.dataset.pluginId),msg=event.data||{};if(!p||msg.source!=='openmagia-plugin')return;if(msg.type==='ready'){postPluginInit(frame,p,frame===rf?'ui':'background');return;}if(msg.type!=='request')return;const reply={source:'openmagia-host',type:'response',requestId:msg.requestId};try{const grants=new Set(p.grants||[]),params=msg.params||{};if(msg.method==='context.get'){if(!grants.has('generation.read')&&!grants.has('project.read'))throw new Error('Permission denied');reply.result=pluginContext();}else if(msg.method==='settings.get'){if(!grants.has('storage'))throw new Error('Permission denied');reply.result=p.settings||{};}else if(msg.method==='settings.set'){if(!grants.has('storage'))throw new Error('Permission denied');const updated=await api('/api/plugins/'+encodeURIComponent(p.id)+'/settings',{method:'POST',body:{settings:params.settings||{}}});p.settings=updated.settings||{};
+window.addEventListener('message',async event=>{const rf=$('#pluginFrame'),background=[...pluginBackgroundFrames.values()],frame=event.source===rf.contentWindow?rf:background.find(x=>x.contentWindow===event.source);if(!frame)return;const p=pluginCatalog.find(x=>x.id===(frame===rf?activePlugin?.id:frame.dataset.pluginId)&&x.enabled),msg=event.data||{};if(!p||msg.source!=='openmagia-plugin')return;if(msg.type==='ready'){postPluginInit(frame,p,frame===rf?'ui':'background');return;}if(msg.type!=='request')return;const reply={source:'openmagia-host',type:'response',requestId:msg.requestId};try{const grants=new Set(p.grants||[]),params=msg.params||{};if(msg.method==='context.get'){if(!grants.has('generation.read')&&!grants.has('project.read'))throw new Error('Permission denied');reply.result=pluginContext();}else if(msg.method==='settings.get'){if(!grants.has('storage'))throw new Error('Permission denied');reply.result=p.settings||{};}else if(msg.method==='settings.set'){if(!grants.has('storage'))throw new Error('Permission denied');const updated=await api('/api/plugins/'+encodeURIComponent(p.id)+'/settings',{method:'POST',body:{settings:params.settings||{}}});p.settings=updated.settings||{};
             // A background frame only receives settings at init, so without this
             // a preference change would not take effect until the page reloaded —
             // a hidden frame keeps sending with stale rules.
             for(const bg of pluginBackgroundFrames.values())if(bg.dataset.pluginId===p.id)postPluginInit(bg,p,'background');
-            reply.result=p.settings;}else if(msg.method==='notifications.send'){if(!grants.has('notifications.'+params.channel))throw new Error('Permission denied');reply.result=await api('/api/plugins/'+encodeURIComponent(p.id)+'/notify',{method:'POST',body:params});}else if(msg.method==='log'){reply.result=await api('/api/plugins/'+encodeURIComponent(p.id)+'/log',{method:'POST',body:params});}else if(msg.method==='ui.close'){closePluginRunner();reply.result={ok:true};}else throw new Error('Unknown plugin API method: '+msg.method);}catch(e){reply.error=e.message||String(e);}event.source.postMessage(reply,'*');});
+            reply.result=p.settings;}else if(msg.method==='notifications.send'){if(!grants.has('notifications.'+params.channel))throw new Error('Permission denied');reply.result=await api('/api/plugins/'+encodeURIComponent(p.id)+'/notify',{method:'POST',body:params});}else if(msg.method==='log'){reply.result=await api('/api/plugins/'+encodeURIComponent(p.id)+'/log',{method:'POST',body:params});}else if(msg.method==='output.open'){if(!grants.has('output.open'))throw new Error('Permission denied');reply.result=openProgramOutput();}else if(msg.method==='ui.close'){closePluginRunner();reply.result={ok:true};}else throw new Error('Unknown plugin API method: '+msg.method);}catch(e){reply.error=e.message||String(e);}event.source.postMessage(reply,'*');});
 
 function bindEvents() {
   $$('[data-inspector-tab]').forEach(b => b.addEventListener('click', () => setInspectorTab(b.dataset.inspectorTab)));
@@ -4168,7 +4321,9 @@ function bindEvents() {
   $('#toEnd').addEventListener('click', () => seekTo(timelineEnd()));
   $('#prevFrame').addEventListener('click', () => stepFrame(-1));
   $('#nextFrame').addEventListener('click', () => stepFrame(1));
-  $('#loopBtn').addEventListener('click', () => { loop = !loop; $('#loopBtn').classList.toggle('on', loop); });
+  syncLoopButton();
+  $('#loopBtn').addEventListener('click', () => { loop = !loop;localStorage.setItem('openmagia-loop',String(loop));syncLoopButton(); });
+  $('#programOutputBtn').addEventListener('click',()=>{try{openProgramOutput();}catch(error){toast(error.message,'err');}});
   $('#muteBtn').addEventListener('click', () => { globalMute = !globalMute; syncGlobalMuteButton(); if (!globalMute && playing) unlockAudio(); else updateAudio(playTime); });
   $('#pluginsBtn').addEventListener('click', openPluginManager);
   $('#pluginSheetClose').addEventListener('click', closePluginManager);$('#pluginSheetScrim').addEventListener('click',closePluginManager);
@@ -4178,7 +4333,10 @@ function bindEvents() {
   $('#timelineMagiaBtn').addEventListener('click',openTimelineMagia);
   $('#timelineMagiaClose').addEventListener('click',closeTimelineMagia);$('#timelineMagiaCancel').addEventListener('click',closeTimelineMagia);$('#timelineMagiaScrim').addEventListener('click',closeTimelineMagia);
   $('#timelineMagiaCleanup').addEventListener('click',cleanUpTimeline);$('#timelineMagiaApply').addEventListener('click',applyTimelineMagia);
+  $('#timelineMagiaRecipe').addEventListener('change',event=>selectTimelineMagiaRecipe(event.target.value));
   $('#timelineMagiaScope').addEventListener('change',scheduleTimelineMagiaPlan);$('#timelineMagiaDirection').addEventListener('input',scheduleTimelineMagiaPlan);
+  $('#timelineMagiaSelectAll').addEventListener('click',()=>{$$('[data-timeline-magia-option]').forEach(input=>{input.checked=true;});scheduleTimelineMagiaPlan();});
+  $('#timelineMagiaClearAll').addEventListener('click',()=>{$$('[data-timeline-magia-option]').forEach(input=>{input.checked=false;});scheduleTimelineMagiaPlan();});
   $('#timelineMagiaExampleToggle').addEventListener('click',()=>{const panel=$('#timelineMagiaExamples');panel.hidden=!panel.hidden;$('#timelineMagiaExampleToggle').textContent=panel.hidden?'View recipe notes':'Hide recipe notes';});
   $$('[data-magia-recipe]').forEach(button=>button.addEventListener('click',()=>selectTimelineMagiaRecipe(button.dataset.magiaRecipe)));
   $$('[data-timeline-magia-option]').forEach(input=>input.addEventListener('change',scheduleTimelineMagiaPlan));
@@ -4387,7 +4545,7 @@ function init() {
     if (q.has('t')) { const tt = parseFloat(q.get('t')); if (isFinite(tt)) playTime = clamp(tt, 0, 9999); }
   }
   refresh();
-  rafId = requestAnimationFrame(tick);
+  rafId = programOutputActive() ? setTimeout(tick, 1000 / 60) : requestAnimationFrame(tick);
   scheduleRefreshPoll();
   document.addEventListener('visibilitychange',handleVisibilityChange);
   window.addEventListener('pageshow',()=>{if(!document.hidden)refresh().finally(scheduleRefreshPoll);});

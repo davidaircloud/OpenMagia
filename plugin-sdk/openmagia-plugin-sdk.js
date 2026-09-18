@@ -5,7 +5,7 @@ export function createOpenMagiaPlugin() {
   const ready = new Promise(resolve => { init = resolve; });
   window.addEventListener('message', event => {
     const message = event.data || {};
-    if (message.source !== 'openmagia-host') return;
+    if (event.source !== parent || message.source !== 'openmagia-host') return;
     if (message.type === 'init') init(message);
     if (message.type === 'event') listeners.forEach(listener => listener(message.event));
     if (message.type === 'response') {
@@ -22,6 +22,7 @@ export function createOpenMagiaPlugin() {
   parent.postMessage({source:'openmagia-plugin', type:'ready'}, '*');
   return {
     ready,
+    output: {open: () => request('output.open')},
     context: {get: () => request('context.get')},
     storage: {get: () => request('settings.get'), set: settings => request('settings.set', {settings})},
     notifications: {send: (channel, title, message) => request('notifications.send', {channel, title, message})},

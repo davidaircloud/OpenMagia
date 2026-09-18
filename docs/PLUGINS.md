@@ -69,6 +69,7 @@ The initialization payload includes `mode` (`ui` or `background`), approved perm
 | `notifications.email` | SMTP email through host configuration |
 | `notifications.imessage` | macOS Messages automation |
 | `storage` | Per-plugin local settings |
+| `output.open` | Open the fixed clean program window for local OBS window capture |
 
 Reserved permissions are valid manifest declarations but methods are added only after their input/output contracts are stable. This prevents the first API from promising unsafe arbitrary access.
 
@@ -96,3 +97,9 @@ The first external example lives beside the OpenMagia repository in `OpenMagia P
 ## Future API directions
 
 Planned extensions include reviewed media processors, timeline tools, export destinations, prompt analyzers, caption/transcript workflows, asset integrations, and marketplace installation/signing. These should extend the capability table rather than expose a generic shell or unrestricted filesystem API.
+
+## OBS Output
+
+A self-contained v1 plugin ships in `plugins/obs-output`. Load it with **Development → Load bundled OBS Output**, approve **Open program output**, and open it from Installed. Its only new API is `await openmagia.output.open()` (`output.open` permission). The response reports whether the fixed program window opened and explains audio routing; denied permissions and popup blocking produce errors. The API accepts no URL, filesystem path, OBS command or credentials.
+
+The program window mirrors the current canvas composition at project resolution, with aspect-preserving letterboxing. Audio continues through the editor's existing mix, so capture the browser application's audio once in OBS. It is a window-capture integration, not an OBS Browser Source URL. See [live performance setup](LIVE_PERFORMANCE.md) for platform instructions and limitations.
