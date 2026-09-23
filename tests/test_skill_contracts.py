@@ -106,6 +106,35 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("Lokillo", expanded)
         self.assertNotIn("car_jump", expanded)
 
+    @mock.patch.object(server, "run_formatter_command")
+    @mock.patch.object(server, "formatter_available", return_value=True)
+    def test_shared_style_rejects_generic_rewrite_that_drops_user_world(self, _available, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout=("OPENMAGIA_RESULT_BEGIN\nA premium cinematic finish with controlled lighting, "
+                    "clean graphics, consistent lenses, and exact product geometry.\nOPENMAGIA_RESULT_END"),
+        )
+        refined, used_ai = server.improve_style_locally(
+            "Apollo lunar landing on the moon", {}, use_model=True
+        )
+        self.assertFalse(used_ai)
+        self.assertIn("Apollo lunar landing on the moon", refined)
+        self.assertNotIn("product geometry", refined)
+
+    @mock.patch.object(server, "run_formatter_command")
+    @mock.patch.object(server, "formatter_available", return_value=True)
+    def test_shared_style_accepts_rewrite_that_preserves_concrete_world(self, _available, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout=("OPENMAGIA_RESULT_BEGIN\nApollo-era lunar realism on the moon, with archival film texture, "
+                    "sunlit regolith, period-correct suit materials, and restrained camera movement.\nOPENMAGIA_RESULT_END"),
+        )
+        refined, used_ai = server.improve_style_locally(
+            "Apollo lunar landing on the moon", {}, use_model=True
+        )
+        self.assertTrue(used_ai)
+        self.assertIn("Apollo-era lunar realism", refined)
+
 
 if __name__ == "__main__":
     unittest.main()

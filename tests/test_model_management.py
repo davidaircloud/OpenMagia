@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -8,6 +9,33 @@ import server
 
 
 class ModelManagementTests(unittest.TestCase):
+    def test_yue_lora_zip_is_validated_stored_and_registered(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); archive = root / "warm-vocal.zip"
+            with zipfile.ZipFile(archive, "w") as out:
+                out.writestr("adapter_config.json", json.dumps({
+                    "base_model_name_or_path":"m-a-p/YuE2-3B", "peft_type":"LORA", "r":8}))
+                out.writestr("adapter_model.safetensors", b"safe-test-weights")
+            registry = root / "registry.json"; lora_root = root / "models" / "loras"
+            with mock.patch.object(server, "MODEL_REGISTRY_FILE", registry), \
+                 mock.patch.object(server, "LORA_ROOT", lora_root), mock.patch.object(server, "ROOT", root):
+                item = server.import_lora(archive, "yue2")
+                resolved = server.resolve_yue_lora(item["id"])
+            self.assertEqual("yue2", item["backend_id"])
+            self.assertEqual(item["id"], resolved["id"])
+            self.assertTrue((Path(item["path"]) / "adapter_config.json").is_file())
+
+    def test_yue_lora_rejects_wrong_base_model(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); archive = root / "wrong.zip"
+            with zipfile.ZipFile(archive, "w") as out:
+                out.writestr("adapter_config.json", json.dumps({"base_model_name_or_path":"Qwen/Qwen2.5"}))
+                out.writestr("adapter_model.safetensors", b"weights")
+            with mock.patch.object(server, "LORA_ROOT", root / "models" / "loras"), \
+                 mock.patch.object(server, "ROOT", root):
+                with self.assertRaisesRegex(ValueError, "YuE2-3B"):
+                    server.import_lora(archive, "yue2")
+
     def test_empty_registry_does_not_mark_recommendation_installed(self):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(server, "MODEL_REGISTRY_FILE", Path(td) / "registry.json"), \

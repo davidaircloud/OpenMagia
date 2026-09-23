@@ -24,6 +24,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from types import SimpleNamespace
 from openmagia_plugins import PluginError, PluginRegistry, send_notification
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -153,7 +154,7 @@ MODEL_BACKENDS = [
      "media":"music", "role":"music_generation",
      "summary":"Full songs with sung lyrics, instrumental cues, and a symbolic ABC score you can inspect.",
      "source":"https://github.com/multimodal-art-projection/YuE",
-     "supports":["lyrics","instrumental","style-tags","abc-score","seed"],
+     "supports":["lyrics","instrumental","style-tags","abc-score","seed","loras"],
      "sizes_gb":[7.3, 0.53]},
 ]
 
@@ -243,6 +244,12 @@ def yue_local_runtime():
             "reason": "" if complete else ("missing " + ", ".join(missing)), "missing": missing,
             "weights": weights, "cli": str(executable),
             "python": str(YUE_LOCAL_VENV / "bin" / "python"), "device": yue_local_device() if installed else ""}
+
+
+def yue_peft_available():
+    """Cheap filesystem check; importing PEFT also imports torch and is too slow for requests."""
+    return any(YUE_LOCAL_VENV.glob("lib/python*/site-packages/peft/__init__.py")) or \
+           (YUE_LOCAL_VENV / "Lib" / "site-packages" / "peft" / "__init__.py").is_file()
 
 
 def yue_local_device(refresh=False):
@@ -644,8 +651,115 @@ def uninstall_managed_model(installation_id):
         MODEL_SOURCE_FILE.write_text(json.dumps(_saved_model_sources, indent=2) + "\n")
     return {"ok":True, "removed":str(target), "active_removed":was_active}
 
-def import_lora(path, backend_id=""):
-    raise ValueError("The installed h3.c backend does not support LoRA adapters. No file was imported.")
+def _lora_files(directory):
+    directory = Path(directory)
+    config = directory / "adapter_config.json"
+    weights = next(iter(sorted(directory.glob("adapter_model*.safetensors"))), None)
+    if not config.is_file() or weights is None:
+        raise ValueError("A LoRA needs adapter_config.json and adapter_model.safetensors.")
+    try:
+        metadata = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("adapter_config.json is not valid JSON.") from exc
+    base = str(metadata.get("base_model_name_or_path") or "")
+    if "yue2-3b" not in base.lower():
+        raise ValueError("This adapter does not declare m-a-p/YuE2-3B as its base model.")
+    if str(metadata.get("peft_type") or "LORA").upper() != "LORA":
+        raise ValueError("Only LoRA PEFT adapters are supported.")
+    return metadata, weights
+
+
+def _register_lora(directory, name, source=None):
+    directory = Path(directory).resolve()
+    metadata, weights = _lora_files(directory)
+    hasher = hashlib.sha256()
+    with weights.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""): hasher.update(chunk)
+    digest = hasher.hexdigest()
+    lora_id = "lora-" + digest[:12]
+    registry = _load_model_registry(); items = registry.setdefault("loras", [])
+    existing = next((item for item in items if item.get("id") == lora_id), None)
+    item = {"id":lora_id, "name":str(name or directory.name)[:120], "backend_id":"yue2",
+            "base_model":metadata.get("base_model_name_or_path"), "path":str(directory),
+            "sha256":digest, "managed":True, "source":source or {"type":"upload"}}
+    if existing: existing.update(item); item = existing
+    else: items.append(item)
+    _save_model_registry(registry)
+    return item
+
+
+def import_lora(path, backend_id="yue2"):
+    if backend_id != "yue2":
+        raise ValueError("That backend does not support LoRA adapters.")
+    source = Path(path)
+    if not source.is_file() or source.suffix.lower() != ".zip":
+        raise ValueError("Choose a .zip containing adapter_config.json and adapter_model.safetensors.")
+    if source.stat().st_size > 2 * 1024 ** 3:
+        raise ValueError("The adapter archive is larger than 2 GB.")
+    LORA_ROOT.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="lora-", dir=str(LORA_ROOT.parent)))
+    try:
+        with zipfile.ZipFile(source) as archive:
+            files = [entry for entry in archive.infolist() if not entry.is_dir()]
+            if any(Path(entry.filename).is_absolute() or ".." in Path(entry.filename).parts for entry in files):
+                raise ValueError("The adapter archive contains unsafe paths.")
+            if sum(entry.file_size for entry in files) > 2 * 1024 ** 3:
+                raise ValueError("The extracted adapter is larger than 2 GB.")
+            allowed = [entry for entry in files if Path(entry.filename).name == "adapter_config.json" or
+                       (Path(entry.filename).name.startswith("adapter_model") and Path(entry.filename).suffix == ".safetensors")]
+            if len(allowed) < 2:
+                raise ValueError("The archive is missing its PEFT config or safetensors weights.")
+            for entry in allowed:
+                target = staging / Path(entry.filename).name
+                with archive.open(entry) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        metadata, weights = _lora_files(staging)
+        hasher = hashlib.sha256()
+        with weights.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""): hasher.update(chunk)
+        digest = hasher.hexdigest()
+        target = LORA_ROOT / "yue2" / ("lora-" + digest[:12])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists(): shutil.rmtree(target)
+        staging.replace(target)
+        staging = None
+        return _register_lora(target, source.stem)
+    finally:
+        if staging and staging.exists(): shutil.rmtree(staging, ignore_errors=True)
+
+
+def import_huggingface_lora(value):
+    parsed = urllib.parse.urlparse(str(value).strip())
+    repo_id = parsed.path.strip("/") if parsed.netloc == "huggingface.co" else str(value).strip().strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_id):
+        raise ValueError("Enter a Hugging Face adapter link or owner/repository ID.")
+    python = YUE_LOCAL_VENV / "bin" / "python"
+    if not python.is_file(): raise ValueError("Install the local YuE 2 runtime before adding an adapter.")
+    target = LORA_ROOT / "yue2" / ("hf-" + hashlib.sha256(repo_id.encode()).hexdigest()[:12])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    script = ("from huggingface_hub import snapshot_download; import sys; "
+              "snapshot_download(sys.argv[1], local_dir=sys.argv[2], "
+              "allow_patterns=['adapter_config.json','adapter_model*.safetensors'])")
+    run = subprocess.run([str(python), "-c", script, repo_id, str(target)],
+                         capture_output=True, text=True, timeout=1800)
+    if run.returncode:
+        shutil.rmtree(target, ignore_errors=True)
+        raise ValueError("Could not download that Hugging Face adapter: " + (run.stderr.strip().splitlines() or ["unknown error"])[-1])
+    try: return _register_lora(target, repo_id.split("/")[-1], {"type":"huggingface", "repo_id":repo_id})
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True); raise
+
+
+def resolve_yue_lora(lora_id):
+    if not lora_id: return None
+    item = next((x for x in (_load_model_registry().get("loras") or []) if x.get("id") == lora_id), None)
+    if not item or item.get("backend_id") != "yue2": raise ValueError("The selected YuE 2 adapter is not installed.")
+    path = Path(item.get("path") or "").resolve(); root = (LORA_ROOT / "yue2").resolve()
+    try: safe = path.is_relative_to(root)
+    except AttributeError: safe = str(path).startswith(str(root) + os.sep)
+    if not safe or not item.get("managed"): raise ValueError("The selected adapter is outside OpenMagia's managed library.")
+    _lora_files(path)
+    return item
 
 def update_lora(lora_id, enabled=None, strength=None, backend_id=None):
     registry = _load_model_registry(); item = next((x for x in registry.get("loras", []) if x.get("id")==lora_id), None)
@@ -2417,6 +2531,7 @@ def clamp_music_params(params):
     out["lyrics"] = str((params or {}).get("lyrics") or "")[:yue_prompts.MAX_LYRICS_CHARS]
     out["abc"] = str((params or {}).get("abc") or "")[:yue_prompts.MAX_ABC_CHARS]
     out["instrumental"] = bool((params or {}).get("instrumental"))
+    out["lora_id"] = str((params or {}).get("lora_id") or "")[:80]
     out["min_duration_seconds"] = max(0, min(360, float((params or {}).get("min_duration_seconds") or 0)))
     try:
         out["seed"] = max(0, min(2 ** 31 - 1, int((params or {}).get("seed", 42))))
@@ -3209,15 +3324,15 @@ def improve_style_locally(idea, answers, use_model=True):
     """Refine reusable project art direction without inventing scene events."""
     defaults = {"medium": "premium cinematic finish", "palette": "a controlled coherent palette with motivated lighting",
                 "camera": "consistent lens character and motivated movement", "graphics": "graphics and typography only when appropriate",
-                "invariants": "preserve exact identity, proportions, wardrobe, materials, accessories, product geometry, labels, and colors"}
+                "invariants": "preserve every explicitly named identity, period detail, proportion, wardrobe element, material, accessory, label, and color"}
     resolved = {k: str(answers.get(k) or v) for k, v in defaults.items()}
     fallback = (f"{idea.strip()} Medium and finish: {resolved['medium']}. Palette and lighting: {resolved['palette']}. "
                 f"Camera language: {resolved['camera']}. Graphics and typography: {resolved['graphics']}. "
                 f"Continuity rules: {resolved['invariants']}. Apply these rules consistently to every scene; do not invent actions, locations, dialogue, visible text, or shot timing.")
     if not use_model or not (formatter_available()):
         return fallback, False
-    instruction = ("Rewrite this as a detailed reusable PROJECT STYLE specification for MiniMax H3. Describe only stable visual identity: medium, finish, palette, lighting, materials, lens and camera language, graphics, typography, and continuity invariants. "
-                   "Do not create a scene, story, action, location, dialogue, timing, cuts, or visible copy. Preserve every user constraint. Return one production-ready paragraph between OPENMAGIA_RESULT_BEGIN and OPENMAGIA_RESULT_END. "
+    instruction = ("Rewrite this as a detailed reusable PROJECT STYLE specification for MiniMax H3. Describe only stable visual identity: named subject or historical identity, established world and environment, period, medium, finish, palette, lighting, materials, lens and camera language, graphics, typography, and continuity invariants. "
+                   "Preserve every concrete noun, proper name, historical or fictional setting, era, and visual constraint supplied by the user. If the input contains an action, retain its stable subject and world but do not turn the style into a shot plan. Do not invent a new product, brand, story, action, location, dialogue, timing, cuts, or visible copy. Return one production-ready paragraph between OPENMAGIA_RESULT_BEGIN and OPENMAGIA_RESULT_END. "
                    f"Direction: {idea}. Requirements: {json.dumps(resolved, ensure_ascii=False)}")
     cmd = [FORMATTER_BIN, "-m", FORMATTER_MODEL, "-p", instruction, "-n", "320", "--temp", "0.2", "--no-display-prompt", "--log-disable", "--single-turn", "--simple-io"]
     try:
@@ -3230,7 +3345,11 @@ def improve_style_locally(idea, answers, use_model=True):
         else:
             text = ""
         text = text.replace("OPENMAGIA_RESULT_BEGIN", "").replace("OPENMAGIA_RESULT_END", "").strip()
-        if run.returncode == 0 and 40 <= len(text) <= 6000 and not any(x.lower() in text.lower() for x in ("Loading model", "available commands", "build :", "model :", "llama")):
+        stop = {"about", "after", "again", "also", "being", "create", "every", "from", "have", "into", "just", "make", "miniMax", "project", "scene", "should", "style", "that", "their", "there", "these", "they", "this", "through", "video", "visual", "what", "when", "where", "which", "with", "would"}
+        anchors = list(dict.fromkeys(word.lower() for word in re.findall(r"[A-Za-z][A-Za-z0-9'-]{3,}", idea) if word.lower() not in {x.lower() for x in stop}))[:8]
+        retained = sum(bool(re.search(r"\b" + re.escape(word) + r"\b", text, re.I)) for word in anchors)
+        preserves_direction = not anchors or retained >= max(1, (len(anchors) + 1) // 2)
+        if run.returncode == 0 and preserves_direction and 40 <= len(text) <= 6000 and not any(x.lower() in text.lower() for x in ("Loading model", "available commands", "build :", "model :", "llama")):
             return text, True
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -4393,6 +4512,14 @@ def music_request_from_scene(scene):
         instrumental=instrumental, skill_direction=direction, skill_id=skill_id,
         song_id=scene.get("name") or scene["id"])
     compiled["request"]["min_duration_seconds"] = float(params.get("min_duration_seconds") or 0)
+    lora = resolve_yue_lora(str(params.get("lora_id") or ""))
+    if lora:
+        if yue_selection().get("mode") != "local":
+            raise ValueError("YuE 2 adapters currently require the local managed runtime.")
+        if not yue_peft_available():
+            raise ValueError("Update the YuE 2 model in Settings once to install LoRA support.")
+        compiled["request"]["adapter"] = {"id":lora["id"], "name":lora["name"],
+                                            "path":lora["path"], "sha256":lora["sha256"]}
     return compiled
 
 
@@ -5618,7 +5745,25 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 return self._json({"error": str(exc)}, 400)
         if p == "/api/models/loras/import":
-            return self._json({"error": "The installed h3.c backend does not support LoRA adapters."}, 400)
+            try:
+                content_type = str(self.headers.get("Content-Type") or "")
+                if "application/json" in content_type:
+                    return self._json(import_huggingface_lora(str(self._body().get("source") or "")), 201)
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0 or length > 2 * 1024 ** 3:
+                    return self._json({"error":"Adapter upload must be between 1 byte and 2 GB."}, 400)
+                LORA_ROOT.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(prefix="lora-upload-", suffix=".zip", dir=str(LORA_ROOT), delete=False) as tmp:
+                    remaining = length
+                    while remaining:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk: break
+                        tmp.write(chunk); remaining -= len(chunk)
+                    upload = Path(tmp.name)
+                try: return self._json(import_lora(upload, "yue2"), 201)
+                finally: upload.unlink(missing_ok=True)
+            except (ValueError, OSError, zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
+                return self._json({"error":str(exc)}, 400)
         lora_update = re.match(r"^/api/models/loras/([a-z0-9-]+)$", p)
         if lora_update:
             b = self._body()

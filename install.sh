@@ -309,13 +309,13 @@ else
       "$YUE_PYTHON" -m venv "$YUE_VENV"
     fi
   fi
-  if [[ ! -x "$YUE_VENV/bin/yue2" || "$UPDATE_SOURCES" -eq 1 ]]; then
+  if [[ ! -x "$YUE_VENV/bin/yue2" || "$UPDATE_SOURCES" -eq 1 ]] || ! "$YUE_VENV/bin/python" -c 'import peft' 2>/dev/null; then
     log "installing the YuE 2 runtime (torch + transformers, a few GB) ..."
     if have uv; then
-      uv pip install --python "$YUE_VENV/bin/python" "$YUE_SRC_DIR"
+      uv pip install --python "$YUE_VENV/bin/python" "$YUE_SRC_DIR" "peft>=0.19.1,<0.20"
     else
       "$YUE_VENV/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-      "$YUE_VENV/bin/python" -m pip install --disable-pip-version-check "$YUE_SRC_DIR"
+      "$YUE_VENV/bin/python" -m pip install --disable-pip-version-check "$YUE_SRC_DIR" "peft>=0.19.1,<0.20"
     fi
   else
     log "YuE 2 runtime present: $YUE_VENV/bin/yue2"

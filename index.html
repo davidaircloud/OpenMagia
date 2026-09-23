@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260918-hub-playhead">
+<link rel="stylesheet" href="style.css?v=20260923-music-composer-v1">
 </head>
 <body>
 
@@ -114,12 +114,16 @@
       <div class="generateScroll">
       <div id="generationTypeNotice" class="generationTypeNotice" hidden></div>
       <div id="videoGenerationControls">
-      <section class="projectStyleCard">
-        <div class="projectStyleTop"><div><span class="scopeLabel">DIRECTION</span></div><div class="styleActions"><button id="projectStyleToggle" class="transitionToggle on" type="button" role="switch" aria-checked="true" aria-label="Use shared instructions"><span></span></button></div></div>
-        <textarea class="txt" id="genStyle" placeholder="Instructions shared by every generated scene."></textarea>
-        <div class="styleComposerBar"><button id="styleRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
+      <section class="projectStyleCard" id="sharedStyleDetails">
+        <button class="projectStyleTop" id="sharedStyleExpand" type="button" aria-expanded="false" aria-controls="sharedStyleBody"><span><span class="scopeLabel">SHARED STYLE</span><small>Applied to every scene</small></span><svg class="sharedStyleChevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
+        <div class="projectStyleBody" id="sharedStyleBody" hidden>
+          <p>Project-wide visual rules only. Write this scene’s action in the main prompt below.</p>
+          <textarea class="txt" id="genStyle" placeholder="Optional stable look: medium, palette, lighting, lenses, materials, and details that must stay consistent…"></textarea>
+          <div class="styleComposerBar"><button id="styleRefineBtn" class="composerTool refineAction" type="button">✦ Refine</button></div>
+        </div>
       </section>
       <section class="h3Composer">
+        <label class="composerPromptLabel" for="genPrompt"><span>PROMPT</span></label>
         <div id="activePromptSkills" class="activePromptSkills"></div>
         <textarea class="txt" id="genPrompt" placeholder="Describe the scene, action, camera, dialogue or visible text…"></textarea>
         <div class="composerContext"><div id="genChars" class="contextChips"></div><button id="castPickerBtn" class="contextAdd">＋ Add cast</button><div id="genRefs" class="referenceChips"></div><button id="referencePickerBtn" class="contextAdd">＋ Add references</button><div class="sourceContext"><button id="sourcePickerBtn" class="contextAdd">＋ Continue frame from media</button><button id="sourceClearBtn" aria-label="Remove opening reference">×</button></div></div>
@@ -156,10 +160,12 @@
            seed. There is deliberately no length, tempo, key, reference-audio or
            negative-prompt field here, because the model has no such argument. -->
       <div id="musicGenerationControls" hidden>
-        <section class="projectStyleCard">
+        <section class="projectStyleCard musicDirectionCard">
           <div class="projectStyleTop"><div><span class="scopeLabel">DIRECTION</span><small id="musicRuntimeHint">YuE 2 composer</small></div></div>
-          <textarea class="txt" id="musicPrompt" placeholder="Describe the song: genre, instruments, vocal character, language, intended tempo…"></textarea>
-          <div class="styleComposerBar"><button id="musicRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
+          <div class="musicDirectionBody">
+            <textarea class="txt" id="musicPrompt" placeholder="Describe the song: genre, instruments, vocal character, language, intended tempo…"></textarea>
+            <div class="styleComposerBar"><button id="musicRefineBtn" class="composerTool refineAction">✦ Refine</button></div>
+          </div>
         </section>
         <section class="h3Composer">
           <div class="activePromptSkills" id="activeMusicSkill"></div>
@@ -167,6 +173,8 @@
             <textarea class="txt" id="musicLyrics" rows="8" spellcheck="false" aria-label="Lyrics" placeholder="[Verse]&#10;your lines&#10;&#10;[Chorus]&#10;your hook"></textarea>
           </div>
           <div class="generationGrid musicGrid">
+            <div class="field"><label>Adapter <span class="info" tabindex="0" role="img" aria-label="About music adapters" data-tooltip="Optionally apply one YuE 2 LoRA to this song. The selection is saved with the song.">i</span></label>
+              <div class="slider-row"><select class="txt" id="musicLora"><option value="">None · Base YuE 2</option></select><button id="musicLoraAdd" class="btn ghost sm" type="button">Add…</button></div></div>
             <div class="field"><label>Structure <span class="info" tabindex="0" role="img" aria-label="About song planning" data-tooltip="Full plans melody and chords; Melody plans melody with free accompaniment; Direct skips symbolic planning. A complete supplied score can be used with Full or Melody.">i</span></label>
               <select class="txt" id="musicPlan"><option value="full" selected>Full plan · score first</option><option value="melody">Melody only</option><option value="off">Off · straight to audio</option></select></div>
             <div class="field"><label>Voice <span class="info" tabindex="0" role="img" aria-label="About the vocal" data-tooltip="YuE 2 has no instrumental mode. This writes an [Instrumental] section and asks for an arrangement with no lead vocal — a style direction, not a switch. Sung words always win.">i</span></label>
@@ -464,7 +472,8 @@
 <div id="toast"></div>
 <input type="file" id="importFile" accept="video/*,image/*" multiple style="display:none">
 <input type="file" id="charFile" accept="image/*" style="display:none">
+<input type="file" id="musicLoraFile" accept=".zip,application/zip" style="display:none">
 
-<script src="app.js?v=20260918-live-inspector"></script>
+<script src="app.js?v=20260923-style-preservation-v2"></script>
 </body>
 </html>

@@ -2557,9 +2557,10 @@ function renderGenerate() {
   const profile = state.style_profile || { name: state.base_prompt ? 'Custom project style' : 'No project style', prompt: state.base_prompt || '' };
   if (profile.skill_id && (!selectedTemplate || selectedTemplate.id !== profile.skill_id)) selectedTemplate = promptTemplates.find(t => t.id === profile.skill_id) || null;
   if (styleEl && document.activeElement !== styleEl) styleEl.value = profile.prompt || '';
-  const hasStyle=!!String(profile.prompt||'').trim(),styleEnabled=hasStyle&&state.style_enabled!==false,toggle=$('#projectStyleToggle');
-  toggle.hidden=!hasStyle;toggle.disabled=!hasStyle;toggle.classList.toggle('on',styleEnabled);toggle.setAttribute('aria-checked',styleEnabled?'true':'false');toggle.title=hasStyle?(styleEnabled?'Shared instructions are applied to Refine and generation':'Shared instructions are saved but ignored by Refine and generation'):'Add shared instructions first';
-  $('.projectStyleCard').classList.toggle('styleOff',hasStyle&&!styleEnabled);
+  const hasStyle=!!String(profile.prompt||'').trim();
+  // Shared style has one simple state: present means applied. Normalize older
+  // projects that saved text while the former on/off switch was disabled.
+  if(hasStyle&&state.style_enabled===false){state.style_enabled=true;api('/api/project',{method:'POST',body:{style_enabled:true}}).catch(()=>{});}
 
   // Cast is opt-in per scene; selected members appear as removable context.
   if (!selCharsInitialized) selCharsInitialized = true;
@@ -2615,18 +2616,21 @@ function applyGenerationType() {
    description, lyrics, planning mode, optional ABC score, seed. Length, tempo, key,
    reference audio and negative prompts are absent because YuE 2 has no argument for
    them - the compile sheet says where anything written for them actually goes. */
-let musicSkillId='',musicSkillCustomization='',musicCompileTimer=null,musicCompileFingerprint='',musicCompileRequest=0,musicBound=false;
+let musicSkillId='',musicSkillCustomization='',musicCompileTimer=null,musicCompileFingerprint='',musicCompileRequest=0,musicBound=false,musicLoras=[];
 function musicRuntime(){return (engine&&engine.music)||null;}
 function musicReady(){const runtime=musicRuntime();return !!(runtime&&runtime.ready);}
+async function refreshMusicLoras(selected){const select=$('#musicLora');if(!select)return;const keep=selected!==undefined?selected:select.value;
+  try{const management=await api('/api/models/manage');musicLoras=(management.loras||[]).filter(item=>item.backend_id==='yue2');select.innerHTML='<option value="">None · Base YuE 2</option>'+musicLoras.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.name)+'</option>').join('');select.value=musicLoras.some(item=>item.id===keep)?keep:'';}
+  catch(error){select.innerHTML='<option value="">None · Base YuE 2</option>';}}
 function syncMusicPlanAvailability(){const plan=$('#musicPlan'),vocal=$('#musicVocal');if(!plan||!vocal)return;
   const instrumental=vocal.value==='instrumental',hasScore=!!(($('#musicAbc')||{}).value||'').trim();
   if(instrumental&&!hasScore)plan.value='off';else if(instrumental&&hasScore&&plan.value==='off')plan.value='full';}
 function musicComposerParams(){const plan=$('#musicPlan'),vocal=$('#musicVocal');
   return {plan_mode:plan?plan.value:'full',lyrics:$('#musicLyrics')?$('#musicLyrics').value:'',
     abc:$('#musicAbc')?$('#musicAbc').value:'',instrumental:!!(vocal&&vocal.value==='instrumental'),
-    seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0};}
+    seed:Number($('#musicSeed')?$('#musicSeed').value:0)||0,lora_id:$('#musicLora')?$('#musicLora').value:''};}
 function resetMusicComposer(){if($('#musicPrompt'))$('#musicPrompt').value='';if($('#musicLyrics'))$('#musicLyrics').value='';
-  if($('#musicAbc'))$('#musicAbc').value='';if($('#musicPlan'))$('#musicPlan').value='full';if($('#musicVocal'))$('#musicVocal').value='lead';
+  if($('#musicAbc'))$('#musicAbc').value='';if($('#musicPlan'))$('#musicPlan').value='full';if($('#musicVocal'))$('#musicVocal').value='lead';if($('#musicLora'))$('#musicLora').value='';
   if($('#musicSeed'))$('#musicSeed').value=Math.floor(Math.random()*1e9);musicSkillId='';musicSkillCustomization='';musicCompileFingerprint='';musicCompileRequest++;
   if(musicCompileTimer)clearTimeout(musicCompileTimer);if($('#musicCompile'))$('#musicCompile').innerHTML='';
   if($('#musicLyricsRefineBtn'))$('#musicLyricsRefineBtn').textContent='✦ Write with model';renderMusicSkills();syncMusicPlanAvailability();}
@@ -2659,8 +2663,10 @@ async function compileMusicPreview(force){const box=$('#musicCompile');if(!box||
     catch(error){if(request===musicCompileRequest){box.innerHTML='';musicCompileFingerprint=fingerprint;}}};
   if(musicCompileTimer)clearTimeout(musicCompileTimer);
   if(force){run();return;} musicCompileTimer=setTimeout(run,650);}
-function bindMusicComposer(){syncMusicPlanAvailability();if(musicBound)return;musicBound=true;
-  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal'||sel==='#musicAbc')syncMusicPlanAvailability();compileMusicPreview(false);});});
+function bindMusicComposer(){syncMusicPlanAvailability();refreshMusicLoras();if(musicBound)return;musicBound=true;
+  ['#musicPrompt','#musicLyrics','#musicAbc','#musicPlan','#musicVocal','#musicSeed','#musicLora'].forEach(sel=>{const el=$(sel);if(el)el.addEventListener('input',()=>{if(sel==='#musicLyrics')$('#musicLyricsRefineBtn').textContent=el.value.trim()?'✦ Refine lyrics':'✦ Write with model';if(sel==='#musicVocal'||sel==='#musicAbc')syncMusicPlanAvailability();compileMusicPreview(false);});});
+  const add=$('#musicLoraAdd'),file=$('#musicLoraFile');if(add&&file)add.addEventListener('click',()=>{const source=prompt('Paste a Hugging Face adapter link or repository ID. Leave blank to choose a local .zip.','');if(source===null)return;if(!source.trim()){file.click();return;}add.disabled=true;api('/api/models/loras/import',{method:'POST',body:{source:source.trim()}}).then(item=>{refreshMusicLoras(item.id);toast('Adapter installed and selected','ok');}).catch(error=>toast(error.message,'err')).finally(()=>{add.disabled=false;});});
+  if(file)file.addEventListener('change',async()=>{const chosen=file.files&&file.files[0];file.value='';if(!chosen)return;add.disabled=true;try{const item=await api('/api/models/loras/import',{method:'POST',raw:chosen,headers:{'Content-Type':'application/zip','X-File-Name':encodeURIComponent(chosen.name)}});await refreshMusicLoras(item.id);toast('Adapter installed and selected','ok');}catch(error){toast(error.message,'err');}finally{add.disabled=false;}});
   const random=$('#musicRandom');if(random)random.addEventListener('click',()=>{$('#musicSeed').value=Math.floor(Math.random()*1e9);compileMusicPreview(true);});
   const refine=$('#musicRefineBtn');if(refine)refine.addEventListener('click',async()=>{if(!engine||!engine.formatter){toast('Install Prompt refinement in Models to use Refine.','warn');setHubView('settings');return;}refine.disabled=true;refine.textContent='Refining…';try{const params=musicComposerParams();const instrumental=!!params.instrumental;const original=$('#musicPrompt').value;const out=await api('/api/music/refine',{method:'POST',body:{prompt:original,lyrics:params.lyrics,prompt_skill_id:musicSkillId,skill_customization:musicSkillCustomization,instrumental:instrumental}});const refined=String(out.style||'').trim();const originalLen=original.trim().length;// Only adopt the refined style when it is genuinely informative; a collapsed
   // reply like "Instrumental" must never overwrite the artist's full description.
@@ -2829,6 +2835,13 @@ function isStructuredH3Prompt(value) {
   const image=text.includes('integrated_multimodal_description:');
   return (video||image)&&/^(subject_definitions:|integrated_multimodal_description:|For the target (video|image),|How the reference pictures align)/.test(text);
 }
+function sharedStylePreservesSource(source,candidate){
+  const stop=new Set(['about','after','again','also','being','create','every','from','have','into','just','make','minimax','project','scene','should','style','that','their','there','these','they','this','through','video','visual','what','when','where','which','with','would']);
+  const anchors=Array.from(new Set((String(source||'').match(/[A-Za-z][A-Za-z0-9'-]{3,}/g)||[]).map(word=>word.toLowerCase()).filter(word=>!stop.has(word)))).slice(0,8);
+  const haystack=' '+String(candidate||'').toLowerCase().replace(/[^a-z0-9'-]+/g,' ')+' ';
+  const retained=anchors.filter(word=>haystack.includes(' '+word+' ')).length;
+  return !anchors.length||retained>=Math.max(1,Math.ceil(anchors.length/2));
+}
 function openPromptSheet(mode = 'scene') {
   refineMode = mode; const styleMode = mode === 'style', storyboardMode=mode==='storyboard', target=storyboardRefineTarget;
   if(storyboardMode&&!target)return;
@@ -2923,10 +2936,13 @@ async function formatFromSheet(useAi) {
 }
 async function applyPromptTemplate() {
   const result = await formatFromSheet(true); if (!result) return;
-  const appliedMode=refineMode;
+  const appliedMode=refineMode;let keptAuthoredStyle=false;
   if (refineMode === 'style') {
-    const prompt = result.out.expanded_idea; const current = state.style_profile || {};
-    const profile = { name: current.name && current.name !== 'No project style' ? current.name : 'Refined project style', prompt, skill_id: current.skill_id || null, source: 'locally refined' };
+    const authored=$('#styleIdea').value.trim();let prompt=String(result.out.expanded_idea||'').trim();const current = state.style_profile || {};
+    // Defense in depth for a stale server or weak local model: never replace
+    // concrete authored identity/world terms with generic style boilerplate.
+    if(!sharedStylePreservesSource(authored,prompt)){prompt=authored;keptAuthoredStyle=true;}
+    const profile = { name: current.name && current.name !== 'No project style' ? current.name : 'Refined project style', prompt, skill_id: current.skill_id || null, source: keptAuthoredStyle?'authored':'locally refined' };
     await api('/api/project', { method: 'POST', body: { style_profile: profile } }); state.style_profile = profile; $('#genStyle').value = prompt; renderGenerate();
   } else if(refineMode==='storyboard'){
     const target=storyboardRefineTarget,card=target.card;
@@ -2941,7 +2957,7 @@ async function applyPromptTemplate() {
       state.style_profile={name:styleResult.profile.name,prompt:styleResult.profile.prompt,skill_id:styleResult.profile.skill_id,source:styleResult.profile.source};state.base_prompt=styleResult.profile.prompt;state.project_style_skills=[...(state.project_style_skills||[]).filter(x=>x.id!==styleResult.profile.id),styleResult.profile];$('#genStyle').value=styleResult.profile.prompt;renderGenerate();
     }
   }
-  closePromptSheet(); toast((result.out.used_ai ? 'Locally refined ' : 'Structured ') + (appliedMode === 'style' ? 'shared instructions applied' : 'H3 prompt applied'), 'ok');
+  closePromptSheet(); toast(keptAuthoredStyle?'The refiner lost your subject, so OpenMagia kept your original shared style.':((result.out.used_ai ? 'Locally refined ' : 'Structured ') + (appliedMode === 'style' ? 'shared instructions applied' : 'H3 prompt applied')),keptAuthoredStyle?'warn':'ok');
 }
 async function loadPromptTemplates() {
   try { const r = await api('/api/prompt/templates'); promptTemplates = r.templates || []; }
@@ -4038,8 +4054,8 @@ async function renderSettings() {
   const installed=generationModels||'<p class="modelEmpty">No models are installed. Choose one from Available or Add-ons.</p>';
   const availableItems=(management.catalog||[]).filter(item=>item.compatible);
   const available=availableItems.map(item=>{const job=(e.model_installs||{})[item.install_component]||{},running=job.status==='running',failed=job.status==='error',progress=Number.isFinite(job.progress)?' '+job.progress+'%':'';return '<div class="backendCard"><div class="backendTitle"><b>'+esc(item.name.replace(' · Metal','').replace(' · music',''))+'</b></div><p>'+esc(item.summary)+'</p><small>'+esc((item.media==='music'?'Music':'Video')+' generation · '+item.disk_gb+' GB disk')+'</small>'+(failed?'<small class="modelInstallError">'+esc(job.message||'Installation failed')+'</small>':'')+'<div class="backendActions">'+(item.installed?'<span>Installed</span>':item.requirements_met?'<button class="btn ghost" data-install-backend="'+esc(item.id)+'" data-install-component="'+esc(item.install_component)+'" '+(running?'disabled':'')+'>'+(running?'Downloading…'+progress:'Install')+'</button>':'<span>Unavailable on this computer</span>')+'</div></div>';}).join('')||'<div class="modelUnavailable"><b>No local generation models are available for this computer.</b></div>';
-  const legacyLoras=(management.loras||[]).map(item=>'<div class="loraRow" data-lora="'+esc(item.id)+'"><span><b>'+esc(item.name)+'</b><small>Stored but inactive</small></span><button class="btn ghost danger" data-remove-lora>Remove file</button></div>').join('');
-    body.innerHTML = '<article class="settingsCard modelSettings"><div class="settingsCardHead"><div><h2>Models</h2><small>Manage generation and refinement models.</small></div></div><div class="modelManagerTabs" role="tablist"><button class="on" data-model-tab="installed">Installed</button><button data-model-tab="available">Available</button><button data-model-tab="addons">Add-ons</button></div><section class="modelManagerPane on" data-model-pane="installed"><div class="managedModelList">'+installed+'</div><details class="modelConnect"><summary>Connect an existing model</summary><section class="modelSelection"><div class="modelSelectionHead"><span>Models already downloaded outside OpenMagia</span><button class="btn ghost" id="detectModels">Scan</button></div><div class="modelSelectionFields"><label><select id="detectedModelSelect" class="txt" aria-label="Installed model" disabled><option>Scanning…</option></select></label><label><select id="detectedModelRole" class="txt" aria-label="Model role" disabled><option>Role</option></select></label><button class="btn primary" id="useSelectedModel" disabled>Use</button></div><div id="detectedModelMeta" class="modelSelectionMeta"></div></section></details></section><section class="modelManagerPane" data-model-pane="available"><div class="backendGrid">'+available+'</div></section><section class="modelManagerPane" data-model-pane="addons"><div class="modelInstallOptions">'+formatterInstall+runtimeInstall+'</div><div class="loraHead"><div><b>LoRA adapters</b><small>The current h3.c engine does not expose LoRA loading, so OpenMagia cannot apply adapters to generation yet.</small></div></div>'+(legacyLoras?'<div class="loraList">'+legacyLoras+'</div>':'')+'</section></article>' +
+  const legacyLoras=(management.loras||[]).map(item=>'<div class="loraRow" data-lora="'+esc(item.id)+'"><span><b>'+esc(item.name)+'</b><small>YuE 2 adapter · available in the music composer</small></span><button class="btn ghost danger" data-remove-lora>Remove file</button></div>').join('');
+    body.innerHTML = '<article class="settingsCard modelSettings"><div class="settingsCardHead"><div><h2>Models</h2><small>Manage generation and refinement models.</small></div></div><div class="modelManagerTabs" role="tablist"><button class="on" data-model-tab="installed">Installed</button><button data-model-tab="available">Available</button><button data-model-tab="addons">Add-ons</button></div><section class="modelManagerPane on" data-model-pane="installed"><div class="managedModelList">'+installed+'</div><details class="modelConnect"><summary>Connect an existing model</summary><section class="modelSelection"><div class="modelSelectionHead"><span>Models already downloaded outside OpenMagia</span><button class="btn ghost" id="detectModels">Scan</button></div><div class="modelSelectionFields"><label><select id="detectedModelSelect" class="txt" aria-label="Installed model" disabled><option>Scanning…</option></select></label><label><select id="detectedModelRole" class="txt" aria-label="Model role" disabled><option>Role</option></select></label><button class="btn primary" id="useSelectedModel" disabled>Use</button></div><div id="detectedModelMeta" class="modelSelectionMeta"></div></section></details></section><section class="modelManagerPane" data-model-pane="available"><div class="backendGrid">'+available+'</div></section><section class="modelManagerPane" data-model-pane="addons"><div class="modelInstallOptions">'+formatterInstall+runtimeInstall+'</div><div class="loraHead"><div><b>YuE 2 adapters</b><small>Add and select an adapter directly from the music composer. H3 adapters remain unavailable.</small></div></div>'+(legacyLoras?'<div class="loraList">'+legacyLoras+'</div>':'')+'</section></article>' +
     '<article class="settingsCard aboutCard"><h2>About OpenMagia</h2><p>OpenMagia is a local-first visual workspace for composing, generating, and editing AI video.</p><div class="appVersionRow"><b>Version</b><span>'+esc(versionLabel)+'</span></div><div><b>Source code</b><a href="https://github.com/davidaircloud/OpenMagia" target="_blank" rel="noopener">GitHub repository ↗</a></div><div><b>License</b><span>AGPL-3.0-only</span></div><small>OpenMagia is free software under the GNU Affero General Public License v3.0 only and comes without warranty.</small></article>'+
     '<article class="settingsCard noticesCard"><h2>Models and open-source notices</h2><div><b>MiniMax H3</b><span>© 2026 MiniMax · Community License</span></div><div><b>Qwen2.5 7B Instruct</b><span>Apache License 2.0</span></div><div><b>YuE 2 runtime</b><span>m-a-p · Apache License 2.0</span></div><div><b>YuE 2 model weights</b><span>m-a-p · CC BY-NC 4.0</span></div><div><b>h3.c</b><span>© 2026 Salvatore Sanfilippo · MIT</span></div><div><b>ffmpeg-skill</b><span><a href="https://github.com/kajisho5/ffmpeg-skill/tree/v0.12.0" target="_blank" rel="noopener">v0.12.0</a> · © 2026 kajisho5 · MIT · workflow inspiration</span></div><div><b>ccv Metal kernels</b><span>© 2010 Liu Liu · BSD-3-Clause</span></div><div><b>llama.cpp / ggml</b><span>© 2023–2026 ggml authors · MIT</span></div><div><b>FFmpeg</b><span>LGPL 2.1+ / optional GPL components</span></div><small>OpenMagia adapts ffmpeg-skill’s typed plan-before-render and verification ideas to its own non-destructive timeline model; no ffmpeg-skill source is bundled. Full terms remain with the linked projects and model sources.</small></article>';
   $$('[data-model-tab]',body).forEach(tab=>tab.addEventListener('click',()=>{$$('[data-model-tab]',body).forEach(x=>x.classList.toggle('on',x===tab));$$('[data-model-pane]',body).forEach(x=>x.classList.toggle('on',x.dataset.modelPane===tab.dataset.modelTab));}));
@@ -4418,13 +4434,16 @@ function bindEvents() {
   $('#storyboardQuality').addEventListener('change',()=>{$('#storyboardSteps').value=({balanced:20,high:30,reference:50})[$('#storyboardQuality').value]||30;scheduleStoryboardSave();});
   document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if($('#musicLyricsSheet').classList.contains('on'))closeMusicLyricsSheet();else if($('#modelLicenseSheet').classList.contains('on'))closeModelLicense();else if($('#modelUninstallSheet').classList.contains('on'))closeModelUninstall();else if($('#timelineMagiaSheet').classList.contains('on'))closeTimelineMagia();else if($('#continuityReviewSheet').classList.contains('on'))closeContinuityReview();else if($('#storyboardReferencePicker').classList.contains('on'))closeStoryboardReferencePicker();else if($('#magiaSheet').classList.contains('on'))closeMagia();else if($('#storyboardWorkspace').classList.contains('on')&&!storyboardSubmitting)closeStoryboard();});
   $('#genAspect').addEventListener('change',e=>setProjectAspect(e.target.value));
-  $('#projectStyleToggle').addEventListener('click',async()=>{
-    if(!String((state.style_profile||{}).prompt||'').trim())return;
-    const enabled=state.style_enabled===false;state.style_enabled=enabled;renderGenerate();
-    try{await api('/api/project',{method:'POST',body:{style_enabled:enabled}});toast(enabled?'Project style enabled':'Project style disabled for Refine and generation','ok');}
-    catch(error){state.style_enabled=!enabled;renderGenerate();toast(error.message,'err');}
+  $('#sharedStyleExpand').addEventListener('click',()=>{const body=$('#sharedStyleBody'),card=$('#sharedStyleDetails'),expanded=body.hidden;body.hidden=!expanded;card.classList.toggle('expanded',expanded);$('#sharedStyleExpand').setAttribute('aria-expanded',expanded?'true':'false');if(expanded)requestAnimationFrame(()=>$('#genStyle').focus({preventScroll:true}));});
+  $('#styleRefineBtn').addEventListener('click', async event => {event.preventDefault();event.stopPropagation();
+    // Save the authored source before opening a sheet or changing views. A
+    // background project refresh must never replace an unsaved style draft.
+    const prompt=$('#genStyle').value.trim(),profile={name:prompt?'Custom project style':'No project style',prompt,skill_id:null,source:'custom'};
+    state.style_profile=profile;state.base_prompt=prompt;
+    state.style_enabled=true;
+    try{await api('/api/project',{method:'POST',body:{style_profile:profile,style_enabled:true}});}catch(error){toast('Shared style could not be saved: '+error.message,'err');return;}
+    if(!engine||!engine.formatter){toast('Shared style was saved. Install Prompt refinement in Models to refine it.','warn');setHubView('settings');return;}openPromptSheet('style');
   });
-  $('#styleRefineBtn').addEventListener('click', () => {if(!engine||!engine.formatter){toast('Install Prompt refinement in Models to use Refine.','warn');setHubView('settings');return;}openPromptSheet('style');});
   $('#modelPickerBtn').addEventListener('click', () => openComposerPicker('models'));
   $('#sourcePickerBtn').addEventListener('click', openSourceSheet);
   $('#castPickerBtn').addEventListener('click', () => openComposerPicker('cast'));
@@ -4444,7 +4463,7 @@ function bindEvents() {
   $('#genStyle').addEventListener('change', () => {
     const prompt = $('#genStyle').value.trim();
     const profile = { name: prompt ? 'Custom project style' : 'No project style', prompt, skill_id: null, source: 'custom' };
-    api('/api/project', { method: 'POST', body: { style_profile: profile } }).then(() => { state.style_profile = profile; renderGenerate(); }).catch(() => {});
+    api('/api/project', { method: 'POST', body: { style_profile: profile, style_enabled:true } }).then(() => { state.style_profile = profile; state.style_enabled=true; renderGenerate(); }).catch(() => {});
   });
   $('#genStyle').addEventListener('pointerup',()=>setTimeout(saveProjectLayout,0));
   $('#genPrompt').addEventListener('pointerup',()=>setTimeout(saveProjectLayout,0));

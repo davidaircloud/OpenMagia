@@ -237,11 +237,13 @@ class Worker:
         request = {k: v for k, v in song.request.items()
                    if k in ("id", "style", "tags", "lyrics", "cot", "abc", "seed", "cfg_scale")}
         (song.workdir / "request.json").write_text(json.dumps(request, indent=2) + "\n")
+        adapter = song.request.get("adapter") if isinstance(song.request.get("adapter"), dict) else None
+        adapter_args = ["--adapter", str(adapter.get("path"))] if adapter and adapter.get("path") else []
         return self.base_command() + ["generate", "--request", str(song.workdir / "request.json"),
                                       "--output", str(song.workdir), "--device", str(self.args.device),
                                       "--backend", str(self.args.backend), "--budget", str(self.args.budget),
                                       "--model", str(self.args.model), "--vae", str(self.args.vae)] \
-               + list(self.args.extra_arg or [])
+               + adapter_args + list(self.args.extra_arg or [])
 
     def note(self, text):
         stamp = time.strftime("%H:%M:%S")
@@ -641,7 +643,7 @@ class Handler(BaseHTTPRequestHandler):
         lyrics = str(body.get("lyrics") or "")
         if not style or not lyrics.strip():
             return self._send(400, {"error": "A music request needs style (or tags) and lyrics."})
-        request = {k: body[k] for k in ("id", "style", "tags", "lyrics", "cot", "abc", "seed", "cfg_scale", "min_duration_seconds") if k in body}
+        request = {k: body[k] for k in ("id", "style", "tags", "lyrics", "cot", "abc", "seed", "cfg_scale", "min_duration_seconds", "adapter") if k in body}
         song = Song(request, self.worker.args.workdir / time.strftime("%Y%m%d") / (str(body.get("id") or "song")[:48] + "-" + uuid.uuid4().hex[:6]))
         song.workdir.mkdir(parents=True, exist_ok=True)
         if not self.worker.enqueue(song):

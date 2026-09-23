@@ -181,6 +181,35 @@ class RequestCompiler(unittest.TestCase):
 
 
 class ParamsAndScene(unittest.TestCase):
+    def test_worker_passes_adapter_to_checked_yue_entrypoint(self):
+        with tempfile.TemporaryDirectory() as td:
+            args = SimpleNamespace(device="cpu", command="python checked.py", yue_cli="",
+                                   backend="torch-eager", budget=24, model="base", vae="vae",
+                                   extra_arg=[], workdir=Path(td))
+            worker = yue_worker.Worker(args)
+            song = yue_worker.Song({"id":"song", "style":"pop", "lyrics":"hello",
+                                    "adapter":{"path":"/managed/adapter"}}, Path(td))
+            command = worker.command(song)
+        self.assertEqual("/managed/adapter", command[command.index("--adapter") + 1])
+
+    def test_selected_lora_survives_params_and_enters_local_worker_request(self):
+        params = server.clamp_music_params({"lyrics":"[Verse]\nHello", "lora_id":"lora-abc"})
+        lora = {"id":"lora-abc", "name":"Warm Vocal", "path":"/managed/warm",
+                "sha256":"123", "backend_id":"yue2"}
+        with mock.patch.object(server, "resolve_yue_lora", return_value=lora), \
+             mock.patch.object(server, "yue_selection", return_value={"mode":"local"}), \
+             mock.patch.object(server, "yue_peft_available", return_value=True):
+            request = server.music_request_from_scene({"id":"song", "prompt":"pop", "params":params})["request"]
+        self.assertEqual("lora-abc", params["lora_id"])
+        self.assertEqual("/managed/warm", request["adapter"]["path"])
+
+    def test_selected_lora_is_rejected_for_remote_worker(self):
+        params = server.clamp_music_params({"lyrics":"[Verse]\nHello", "lora_id":"lora-abc"})
+        with mock.patch.object(server, "resolve_yue_lora", return_value={"id":"lora-abc"}), \
+             mock.patch.object(server, "yue_selection", return_value={"mode":"endpoint"}):
+            with self.assertRaisesRegex(ValueError, "local managed runtime"):
+                server.music_request_from_scene({"id":"song", "prompt":"pop", "params":params})
+
     def test_minimum_duration_survives_scene_compilation(self):
         params = server.clamp_music_params({"lyrics": "[Verse]\nHello", "min_duration_seconds": 150})
         result = server.music_request_from_scene({"id": "test", "prompt": "piano pop", "params": params})
@@ -323,6 +352,9 @@ class Registry(unittest.TestCase):
         script = (root / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="activeMusicSkill"', html)
         self.assertIn('id="musicSkillBtn"', html)
+        self.assertIn('id="musicLora"', html)
+        self.assertIn('id="musicLoraAdd"', html)
+        self.assertIn("lora_id:$('#musicLora')", script)
         self.assertNotIn('class="musicSkills"', html)
         self.assertNotIn('const musicCard=', script)
         self.assertIn("musicSkillMode", script)

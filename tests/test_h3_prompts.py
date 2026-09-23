@@ -28,6 +28,13 @@ class H3PromptTests(unittest.TestCase):
         self.assertNotIn("[Shot 1] At", prompt)
         self.assertTrue(prompt.startswith("integrated_multimodal_description: [Shot 1] Cinematic."))
 
+    def test_shared_style_is_compiled_into_the_h3_visual_description(self):
+        style = "Apollo-era lunar realism with archival film texture and sunlit regolith."
+        prompt = format_prompt(idea="The lunar module settles onto the surface.", style=style, frames=120)
+        visual = prompt.split("overall_soundscape:", 1)[0]
+        self.assertIn(style, visual)
+        self.assertNotIn(style, prompt.split("overall_soundscape:", 1)[1])
+
     def test_ref_field_order_and_labels(self):
         chars = [{"name": "AO", "paths": ["a.png", "b.png"]}]
         prompt = format_prompt(idea="AO jumps.", style="Anime.", frames=312,

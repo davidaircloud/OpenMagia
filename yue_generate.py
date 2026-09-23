@@ -12,12 +12,37 @@ def main():
     from yue2.pipeline import YuE2Pipeline
     from yue_worker import inspect_abc_score, check_planned_audio_coverage
 
-    args = cli.parser().parse_args(sys.argv[1:])
+    argv = list(sys.argv[1:])
+    adapter = None
+    if "--adapter" in argv:
+        index = argv.index("--adapter")
+        if index + 1 >= len(argv):
+            raise ValueError("--adapter needs a local PEFT adapter directory")
+        adapter = str(Path(argv[index + 1]).resolve())
+        del argv[index:index + 2]
+    args = cli.parser().parse_args(argv)
     if args.command != "generate":
-        return cli.main(sys.argv[1:])
+        return cli.main(argv)
     original_plan = YuE2Pipeline.plan
     original_semantic = YuE2Pipeline.generate_semantic
+    original_load_model = YuE2Pipeline._load_model
     checks = {}
+
+    def load_model(self, *pos, **kwargs):
+        if adapter and self.backend == "vllm":
+            raise ValueError("YuE 2 LoRA adapters currently require the torch or torch-eager backend.")
+        if adapter and self.quantization != "none":
+            raise ValueError("YuE 2 LoRA adapters currently require unquantized model loading.")
+        model = original_load_model(self, *pos, **kwargs)
+        if adapter and not getattr(self, "_openmagia_adapter", False):
+            config = Path(adapter) / "adapter_config.json"
+            if not config.is_file() or not any(Path(adapter).glob("adapter_model*.safetensors")):
+                raise ValueError("The selected LoRA is missing its PEFT config or safetensors weights.")
+            model.load_adapter(adapter, adapter_name="openmagia", is_trainable=False, local_files_only=True)
+            model.set_adapter("openmagia")
+            self._openmagia_adapter = True
+            self.weights["adapter"] = {"path": adapter}
+        return model
 
     def plan(self, *pos, **kwargs):
         result = original_plan(self, *pos, **kwargs)
@@ -65,6 +90,7 @@ def main():
 
     YuE2Pipeline.plan = plan
     YuE2Pipeline.generate_semantic = semantic
+    YuE2Pipeline._load_model = load_model
     return cli.generate(args)
 
 
