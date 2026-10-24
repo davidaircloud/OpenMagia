@@ -5481,14 +5481,12 @@ def run_sheet_job(sheet_id, project):
                                 text=True, cwd=str(Path(H3_BIN).parent),
                                 start_new_session=(os.name != "nt"))
         sheet_proc = proc
-        pat = re.compile(r"([A-Za-z_ ]+?)\s+(\d+)/(\d+)")
         tail = []
         for line in proc.stderr:
             line = line.rstrip("\n")
-            m = pat.search(line)
-            if m:
-                sheet_progress[sheet_id] = {"phase": m.group(1).strip(),
-                                            "completed": int(m.group(2)), "total": int(m.group(3))}
+            parsed = parse_h3_progress_line(line)
+            if parsed:
+                sheet_progress[sheet_id] = parsed
             else:
                 tail.append(line)
                 del tail[:-30]
