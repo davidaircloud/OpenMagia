@@ -66,3 +66,12 @@ The launcher follows application `main`. A recovery-branch commit alone will not
 Generated Qwen, H3, and YuE material is a private evaluation draft, subject to
 its respective model terms. Installer and inference logs, model revisions,
 license snapshots, and media metadata are in ignored `data/launch-demo/`.
+
+## Follow-up fixes — 2026-10-24
+
+- Composed-character progress uses the native progress parser. A queue recovery race now loads project state under the completion lock; completed turnaround media and saved Cast are no longer requeued from stale state.
+- New Project uses an accessible, centered in-app dialog because the embedded browser suppresses the previous window prompt. Creation opens the empty editor; cancellation and persistence were verified in browser.
+- Asset Center audio cards reuse the music Skills glyph instead of attempting to load audio as an image. Native controls support direct preview, only one asset preview plays at once, and Audio has its own filter. Playback and the pause-on-next-preview behavior were verified in browser.
+- Actual Ref2VA Compose Character generation produced a five-second turnaround and six saved Cast views on this Apple Silicon machine. Local YuE generation also produced a new instrumental cue. These remain private evaluation outputs, not repository fixtures.
+- Pinokio remains a lifecycle launcher for the same application source; app changes must be published to the tracked upstream branch before the public launcher Update action can receive them.
+- Models, projects, audio/video renders, screenshots, logs, cache, local settings and credentials are excluded. The Huashu trailer workspace is a separate local project and is not part of either repository.

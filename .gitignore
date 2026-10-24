@@ -18,3 +18,12 @@ models/
 addons/
 
 /addons/qwen-image/
+
+# local development environments and credentials
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.py[cod]
+.pytest_cache/

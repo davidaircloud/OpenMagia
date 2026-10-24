@@ -4151,6 +4151,18 @@ async function renderAssetCenter(options={}) {
       const pending = div('generationPending'); pending.innerHTML = '<span></span><b>' + (item.status === 'running' ? 'Generating' : 'Queued') + '</b>'; thumb.appendChild(pending);
     } else if (item.status === 'error') {
       const pending = div('generationPending error'); pending.innerHTML = '<b>Generation failed</b>'; thumb.appendChild(pending);
+    } else if (item.kind === 'audio') {
+      thumb.classList.add('assetAudioPreview');
+      const art = div('assetAudioArt');
+      art.innerHTML = skillPreviewMarkup({type:'music',icon:'♫'});
+      art.setAttribute('aria-hidden', 'true');
+      const audio = document.createElement('audio');
+      audio.controls = true; audio.preload = 'none'; audio.src = item.preview;
+      audio.setAttribute('aria-label', 'Preview ' + (item.name || 'audio'));
+      audio.addEventListener('play', () => {
+        grid.querySelectorAll('audio').forEach(other => { if (other !== audio) other.pause(); });
+      });
+      thumb.append(art, audio);
     } else {
       const el = document.createElement('img'); el.src = item.preview; el.alt = '';
       if (item.kind === 'video') el.onerror = () => { const v = document.createElement('video'); v.src = item.preview; v.muted = true; v.preload = 'metadata'; v.playsInline = true; el.replaceWith(v); };
