@@ -75,3 +75,13 @@ license snapshots, and media metadata are in ignored `data/launch-demo/`.
 - Actual Ref2VA Compose Character generation produced a five-second turnaround and six saved Cast views on this Apple Silicon machine. Local YuE generation also produced a new instrumental cue. These remain private evaluation outputs, not repository fixtures.
 - Pinokio remains a lifecycle launcher for the same application source; app changes must be published to the tracked upstream branch before the public launcher Update action can receive them.
 - Models, projects, audio/video renders, screenshots, logs, cache, local settings and credentials are excluded. The Huashu trailer workspace is a separate local project and is not part of either repository.
+
+## Storyboard and Asset Center follow-up
+
+- Audio and video Asset Center cards now share a compact keyboard-accessible transport, seek bar, and duration. Audio uses the existing music Skills glyph; video retains its poster until playback. Only one asset preview plays at a time, and leaving Assets pauses it. Project chips are explicitly labeled “Used in projects”; these are assignments, not user-created tags.
+- Magia storyboard creation preserves the selected audio mode and notes instead of forcing silent output. A real codec regression checks a 15-second two-cut export around the join and near its end.
+- Local AI generates context-specific continuity choices and complete proposed prompt repairs. The user can enable/disable issues and individual scene edits, inspect before/after prompts, and apply without queuing generation. The next generation request rechecks continuity. Invalid or ungrounded model responses leave the draft unchanged.
+- Native H3MLX rain evaluation: 360 frames, 512×512, 12 steps, 35 layers, reuse 2; 521 seconds elapsed. Audio decoded at 15.083 seconds with no clipped/nonfinite samples or silent 100ms windows. This is one pipeline check, not a speed/stability benchmark or a diagnosis of a deleted project's audio.
+
+- Final follow-up validation: 289 Python tests passed with managed FFmpeg; the standalone JavaScript storyboard project-scope test passed. The actual local-model repair was previewed with its toggle off/on, applied only to the selected scene, retained 360 frames per scene, and did not queue generation. The corrected sequence passed a subsequent local-model audit.
+- Storyboard autosaves now use a project-scoped endpoint and capture the draft/project identity before debounce, preventing cross-project overwrites during navigation.

@@ -58,6 +58,7 @@ let sourceSelection = null;
 let pendingSourceFrame = 'last';
 let generationSubmitting = false;
 let storyboardDraft = null;
+let storyboardProjectSlug = null;
 let storyboardSaveTimer = 0;
 let storyboardSubmitting = false;
 let continuityAuditPending = false;
@@ -2348,6 +2349,7 @@ function storyboardNewCard(index){
   return {id:'draft-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7),name:'Scene '+(index+1),prompt:'',...refs,continue_previous:index>0,source_media_id:index===0&&sourceSelection?sourceSelection.mediaId:null,source_name:index===0&&sourceSelection?sourceSelection.name:''};
 }
 function ensureStoryboardDraft(){
+  if(storyboardProjectSlug!==(state&&state.slug)){clearTimeout(storyboardSaveTimer);storyboardDraft=null;storyboardProjectSlug=state&&state.slug;}
   if(storyboardDraft)return storyboardDraft;
   const saved=state&&state.storyboard_draft;
   if(saved&&Array.isArray(saved.scenes)&&saved.scenes.length>=2)storyboardDraft=JSON.parse(JSON.stringify(saved));
@@ -2444,7 +2446,7 @@ function captureStoryboardFields(){
   const value=id=>$(id)&&$(id).value;storyboardDraft.output={aspect:value('#storyboardAspect')||'1:1',resolution:value('#storyboardResolution')||'native',quality:value('#storyboardQuality')||'high',frames:+(storyboardDraft.output||{}).frames||56,steps:+value('#storyboardSteps')||30,seed:+value('#storyboardSeed')||42,audio_mode:value('#storyboardAudioMode')||'effects',audio_notes:value('#storyboardAudioNotes')||''};
   storyboardDraft.optimize_scenes=false;
 }
-function scheduleStoryboardSave(){captureStoryboardFields();clearTimeout(storyboardSaveTimer);storyboardSaveTimer=setTimeout(()=>api('/api/project',{method:'POST',body:{storyboard_draft:storyboardDraft}}).catch(()=>{}),300);}
+function scheduleStoryboardSave(){captureStoryboardFields();clearTimeout(storyboardSaveTimer);const slug=storyboardProjectSlug,draft=JSON.parse(JSON.stringify(storyboardDraft));if(!slug||!draft)return;storyboardSaveTimer=setTimeout(()=>api('/api/projects/'+encodeURIComponent(slug)+'/storyboard',{method:'POST',body:{project_slug:slug,storyboard_draft:draft}}).catch(()=>{}),300);}
 function renderStoryboard(){
   const draft=ensureStoryboardDraft(),style=draft.style_profile||{};
   draft.use_project_style=true;$('#storyboardStyle').value=style.prompt||'';
@@ -2477,7 +2479,7 @@ function localMagiaStoryboard(idea,seconds,optimize){
     return {...card,id:'magia-'+base+'-'+index,name:'Scene '+(index+1),prompt:'Scene '+(index+1)+' of '+count+', '+duration.toFixed(2)+' seconds. '+(index?'Continue from the exact final frame of the previous scene. ':'Begin the story. ')+beat+' Preserve this complete story intent without showing later beats early: '+idea,original_prompt:idea,continue_previous:index>0,params:{...(card.params||{}),frames:Math.max(8,Math.round(duration*24))},duration_seconds:duration,character_ids:[...(magiaCard.character_ids||[])],character_reference_ids:{...(magiaCard.character_reference_ids||{})},reference_media_ids:[...(magiaCard.reference_media_ids||[])],prompt_skill_id:magiaCard.prompt_skill_id||null,required_prompt_skill_id:magiaCard.prompt_skill_id||null};
   });
 }
-async function createMagiaStoryboard(){const idea=$('#magiaIdea').value.trim(),seconds=parseFloat($('#magiaDuration').value),optimize=$('#magiaOptimize').checked;if(!idea){toast('Describe the idea first','err');$('#magiaIdea').focus();return;}if(!Number.isFinite(seconds)||seconds<1){toast('Enter a duration of at least one second','err');return;}const count=Math.ceil(seconds/(optimize?5:15));if(count>24){toast('Magia supports up to 24 scenes for this scene length','err');return;}const button=$('#magiaCreate'),draft=ensureStoryboardDraft(),skill=storyboardPromptSkill(magiaCard);button.disabled=true;button.querySelector('span').textContent='Building storyboard…';try{let result;try{result=await api('/api/storyboards/magia',{method:'POST',body:{idea,duration_seconds:seconds,optimize_five_seconds:optimize,use_ai:true,style:(draft.style_profile||{}).prompt||'',skill_direction:promptSkillInstruction(skill),context:{character_ids:magiaCard.character_ids||[],character_reference_ids:magiaCard.character_reference_ids||{},reference_media_ids:magiaCard.reference_media_ids||[],prompt_skill_id:magiaCard.prompt_skill_id||null}}});}catch(error){if(error.status!==404)throw error;result={scenes:localMagiaStoryboard(idea,seconds,optimize),used_ai:false,compatibility_fallback:true};}draft.scenes=result.scenes;draft.output={...(draft.output||{}),audio_mode:'silent',audio_notes:'Visual continuity validation pass; add designed sound after picture approval.'};if(result.project_style){draft.style_profile={...(draft.style_profile||{}),name:'Magia style',prompt:result.project_style,skill_id:null,source:'magia'};draft.use_project_style=true;}draft.optimize_scenes=false;draft.continuity_review=null;draft.optimized_fingerprint=null;closeMagia();renderStoryboard();scheduleStoryboardSave();$('.storyboardBody').scrollTop=0;toast(result.compatibility_fallback?'Storyboard created. Restart OpenMagia before AI refinement.':(result.used_ai?'Magia prepared ':'Created ')+result.scenes.length+' scene'+(result.scenes.length===1?'':'s')+' · silent continuity pass',result.compatibility_fallback?'warn':'ok');}catch(error){toast(error.message,'err');}finally{button.disabled=false;button.querySelector('span').textContent='Create storyboard';}}
+async function createMagiaStoryboard(){const idea=$('#magiaIdea').value.trim(),seconds=parseFloat($('#magiaDuration').value),optimize=$('#magiaOptimize').checked;if(!idea){toast('Describe the idea first','err');$('#magiaIdea').focus();return;}if(!Number.isFinite(seconds)||seconds<1){toast('Enter a duration of at least one second','err');return;}const count=Math.ceil(seconds/(optimize?5:15));if(count>24){toast('Magia supports up to 24 scenes for this scene length','err');return;}const button=$('#magiaCreate'),draft=ensureStoryboardDraft(),skill=storyboardPromptSkill(magiaCard);button.disabled=true;button.querySelector('span').textContent='Building storyboard…';try{let result;try{result=await api('/api/storyboards/magia',{method:'POST',body:{idea,duration_seconds:seconds,optimize_five_seconds:optimize,use_ai:true,style:(draft.style_profile||{}).prompt||'',skill_direction:promptSkillInstruction(skill),context:{character_ids:magiaCard.character_ids||[],character_reference_ids:magiaCard.character_reference_ids||{},reference_media_ids:magiaCard.reference_media_ids||[],prompt_skill_id:magiaCard.prompt_skill_id||null}}});}catch(error){if(error.status!==404)throw error;result={scenes:localMagiaStoryboard(idea,seconds,optimize),used_ai:false,compatibility_fallback:true};}draft.scenes=result.scenes;draft.output={...(draft.output||{}),audio_mode:(draft.output||{}).audio_mode||'effects'};if(result.project_style){draft.style_profile={...(draft.style_profile||{}),name:'Magia style',prompt:result.project_style,skill_id:null,source:'magia'};draft.use_project_style=true;}draft.optimize_scenes=false;draft.continuity_review=null;draft.optimized_fingerprint=null;closeMagia();renderStoryboard();scheduleStoryboardSave();$('.storyboardBody').scrollTop=0;toast(result.compatibility_fallback?'Storyboard created. Restart OpenMagia before AI refinement.':(result.used_ai?'Magia prepared ':'Created ')+result.scenes.length+' scene'+(result.scenes.length===1?'':'s')+' · '+((draft.output||{}).audio_mode||'effects')+' audio',result.compatibility_fallback?'warn':'ok');}catch(error){toast(error.message,'err');}finally{button.disabled=false;button.querySelector('span').textContent='Create storyboard';}}
 function storyboardIdentityNotes(card){
   const notes=(card.character_ids||[]).map(id=>state.characters.find(c=>c.id===id)).filter(Boolean).map(c=>c.name+': '+String(c.description||c.identity_notes||'Preserve this character’s established identity and anatomy.').trim());
   return notes.length?' Cast identity notes (text only; these are not Picture references): '+notes.join(' '):'';
@@ -2519,21 +2521,61 @@ function continuityReviewFingerprint(draft){return JSON.stringify({style:(draft.
 function closeContinuityReview(){continuityAuditState=null;const sheet=$('#continuityReviewSheet');sheet.classList.remove('on');sheet.setAttribute('aria-hidden','true');}
 function renderContinuityReview(result,draft,fingerprint){
   continuityAuditState={result,draft,fingerprint};const issues=result.issues||[],wrap=$('#continuityReviewIssues');wrap.innerHTML='';
-  $('#continuityReviewStatus').textContent=issues.length?'Fix or confirm '+issues.length+' transition'+(issues.length===1?'':'s')+' before generating.':'No continuity conflicts found.';
-  if(!issues.length)wrap.innerHTML='<div class="continuityIssue continuityClear"><h3>Ready to generate</h3><p>If this scene continues a rendered clip, confirm its last frame matches the intended cast, props, placement, and direction.</p></div>';
-  issues.forEach((issue,i)=>{const scene=draft.scenes[issue.scene_index],el=div('continuityIssue'),hard=['duration','skill','resource','physical'].includes(issue.category);el.innerHTML='<h3>'+esc((scene&&scene.name)||('Scene '+(issue.scene_index+1)))+' · '+esc(issue.title)+'</h3><p>'+esc(issue.detail)+'</p><label>How to fix<select class="txt" data-continuity-resolution="'+i+'"><option value="">Choose a fix…</option>'+(hard?'':'<option value="established">Keep — it is visible in the previous frame</option><option value="introduced">Keep — this scene shows how it appears</option>')+'<option value="edit">Edit the scene prompt or references</option></select></label>';wrap.appendChild(el);});
-  const sheet=$('#continuityReviewSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#continuityReviewConfirm').textContent=issues.length?'Confirm and generate':'Generate storyboard';$('#continuityReviewConfirm').focus({preventScroll:true});
+  $('#continuityReviewStatus').textContent=result.fix_error || (result.fixes_used_ai?'Choose a local AI repair for each issue. Preview changes before applying.':'Review continuity issues or edit the storyboard manually.');
+  issues.forEach((issue,i)=>{
+    const scene=draft.scenes[issue.scene_index],el=div('continuityIssue');
+    el.innerHTML='<h3>'+esc((scene&&scene.name)||('Scene '+(issue.scene_index+1)))+' · '+esc(issue.title)+'</h3><p>'+esc(issue.detail)+'</p><label class="continuityFixToggle"><input type="checkbox" data-continuity-enabled="'+i+'" checked> Include this repair</label><label>Local AI suggestion<select class="txt" data-continuity-resolution="'+i+'"><option value="">Choose a repair…</option></select></label>';
+    const select=$('select',el);
+    for(const option of issue.fix_options||[]){const node=document.createElement('option');node.value=option.id;node.textContent=option.label;select.appendChild(node);}
+    const manual=document.createElement('option');manual.value='manual';manual.textContent='Edit this scene manually';select.appendChild(manual);
+    wrap.appendChild(el);
+  });
+  const sheet=$('#continuityReviewSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#continuityReviewConfirm').textContent='Preview selected fixes';
 }
 async function requestContinuityReview(draft){
   if(continuityAuditPending)return;continuityAuditPending=true;const button=$('#storyboardGenerate'),original=button.querySelector('span').textContent;button.querySelector('span').textContent='Checking continuity…';let generateAfterAudit=false;
-  try{const fingerprint=continuityReviewFingerprint(draft);const result=await api('/api/continuity/audit',{method:'POST',body:{style_profile:draft.style_profile,scenes:draft.scenes,use_ai:true}});if((result.issues||[]).length){renderContinuityReview(result,draft,fingerprint);}else{draft.continuity_review={confirmed_at:new Date().toISOString(),resolutions:[],fingerprint};scheduleStoryboardSave();generateAfterAudit=true;}}catch(error){toast('Continuity review could not run: '+error.message,'err');}finally{continuityAuditPending=false;button.querySelector('span').textContent=original;}
+  try{const fingerprint=continuityReviewFingerprint(draft);const result=await api('/api/continuity/audit',{method:'POST',body:{style_profile:draft.style_profile,scenes:draft.scenes,use_ai:true,suggest_fixes:true}});if((result.issues||[]).length){renderContinuityReview(result,draft,fingerprint);}else{draft.continuity_review={confirmed_at:new Date().toISOString(),resolutions:[],fingerprint};scheduleStoryboardSave();generateAfterAudit=true;}}catch(error){toast('Continuity review could not run: '+error.message,'err');}finally{continuityAuditPending=false;button.querySelector('span').textContent=original;}
   if(generateAfterAudit)await generateStoryboard();
 }
-function confirmContinuityReview(){
-  const audit=continuityAuditState;if(!audit)return;const issues=audit.result.issues||[],resolutions=[];
-  for(let i=0;i<issues.length;i++){const select=$('[data-continuity-resolution="'+i+'"]');if(!select||!select.value){toast('Resolve every continuity item before generating','err');return;}if(select.value==='edit'){closeContinuityReview();toast('Update the scene, then run the continuity review again','ok');return;}resolutions.push({scene_index:issues[i].scene_index,fact:issues[i].fact||issues[i].title,resolution:select.value});}
-  for(const item of resolutions){const card=audit.draft.scenes[item.scene_index],prior=Array.isArray((card.guide_answers||{}).continuity_review)?card.guide_answers.continuity_review:[];const statement=(item.resolution==='established'?'Confirmed visible in the approved previous frame: ':'This scene must visibly introduce before it is treated as persistent: ')+item.fact;card.guide_answers={...(card.guide_answers||{}),continuity_review:[...prior,statement]};if(isStructuredH3Prompt(card.prompt)&&card.prompt.includes('detailed_description:')&&!card.prompt.includes(statement))card.prompt=card.prompt.replace('detailed_description:','detailed_description: Continuity ledger — '+statement+'. ');}
-  audit.draft.continuity_review={confirmed_at:new Date().toISOString(),resolutions};audit.draft.continuity_review.fingerprint=continuityReviewFingerprint(audit.draft);scheduleStoryboardSave();closeContinuityReview();generateStoryboard();
+async function confirmContinuityReview(){
+  const audit=continuityAuditState;if(!audit)return;
+  if(audit.fingerprint!==continuityReviewFingerprint(audit.draft)){closeContinuityReview();toast('The storyboard changed. Run continuity review again.','err');return;}
+  if(audit.proposed){
+    let count=0;
+    for(const [i,edit] of audit.proposed.edits.entries()){
+      if(!$('[data-continuity-accept="'+i+'"]').checked)continue;
+      const card=audit.draft.scenes[edit.scene_index];card.prompt=edit.prompt;card.refined_prompt=edit.prompt;
+      if(edit.params_patch)card.params={...(card.params||{}),...edit.params_patch};
+      if(edit.prompt_skill_id)card.prompt_skill_id=edit.prompt_skill_id;
+      card.guide_answers={...(card.guide_answers||{}),continuity_review:[edit.explanation]};count++;
+    }
+    if(!count){toast('Enable at least one proposed scene change','err');return;}
+    delete audit.draft.continuity_review;scheduleStoryboardSave();closeContinuityReview();renderStoryboard();
+    toast('Applied '+count+' scene repair'+(count===1?'':'s')+'. Review the changes, then generate to recheck continuity.','ok');return;
+  }
+  const choices=[];
+  for(let i=0;i<(audit.result.issues||[]).length;i++){
+    if(!$('[data-continuity-enabled="'+i+'"]').checked)continue;
+    const value=$('[data-continuity-resolution="'+i+'"]').value;
+    if(value==='manual'){closeContinuityReview();toast('Update the scene, then review continuity again','ok');return;}
+    if(!value){toast('Choose a repair for each enabled issue','err');return;}
+    choices.push({issue_index:i,option_id:value,enabled:true});
+  }
+  if(!choices.length){toast('Enable at least one repair','err');return;}
+  const button=$('#continuityReviewConfirm');button.disabled=true;button.textContent='Preparing local AI edits…';
+  try{
+    const proposed=await api('/api/continuity/resolve',{method:'POST',body:{scenes:audit.draft.scenes,style_profile:audit.draft.style_profile||{},issues:audit.result.issues,choices,fingerprint:audit.result.fingerprint}});
+    if(continuityAuditState!==audit)return;
+    audit.proposed=proposed;const wrap=$('#continuityReviewIssues');wrap.innerHTML='';
+    for(const [i,edit] of proposed.edits.entries()){
+      const el=div('continuityIssue');el.innerHTML='<label class="continuityFixToggle"><input type="checkbox" data-continuity-accept="'+i+'" checked> Apply to '+esc(audit.draft.scenes[edit.scene_index].name||('Scene '+(edit.scene_index+1)))+'</label><p>'+esc(edit.explanation)+'</p><details><summary>Before</summary><pre></pre></details><h3>Proposed prompt</h3><pre class="continuityProposed"></pre>';
+      $('details pre',el).textContent=edit.before;$('.continuityProposed',el).textContent=edit.prompt;
+      if(edit.params_patch||edit.prompt_skill_id){const note=document.createElement('p');note.textContent=[edit.params_patch?'Restore '+edit.params_patch.frames+' frames':null,edit.prompt_skill_id?'Restore required skill: '+edit.prompt_skill_id:null].filter(Boolean).join(' · ');el.appendChild(note);}
+      wrap.appendChild(el);
+    }
+    $('#continuityReviewStatus').textContent='Local AI preview. Only enabled scene changes will be applied. Nothing has been queued.';
+    button.textContent='Apply enabled changes';
+  }catch(error){toast(error.message,'err');button.textContent='Preview selected fixes';}finally{button.disabled=false;}
 }
 async function generateStoryboard(){
   if(storyboardSubmitting||continuityAuditPending)return;captureStoryboardFields();const draft=ensureStoryboardDraft(),empty=draft.scenes.findIndex(s=>!String(s.prompt||'').trim());if(empty>=0){toast('Scene '+(empty+1)+' needs a prompt','err');return;}const fingerprint=continuityReviewFingerprint(draft);if(!draft.continuity_review||draft.continuity_review.fingerprint!==fingerprint){await requestContinuityReview(draft);return;}const out=draft.output||{},aspect=out.aspect||'1:1',native=out.resolution==='native',landscape=aspect==='16:9',portrait=aspect==='9:16',dims=native?(landscape?[1344,768]:portrait?[768,1344]:[768,768]):(landscape?[896,512]:portrait?[512,896]:[512,512]),h3mlx=engine&&engine.h3_backend==='h3mlx',quality=h3mlx?{layers:35,reuse:out.quality==='balanced'?2:1}:({balanced:{layers:45,reuse:2},high:{layers:50,reuse:1},reference:{layers:50,reuse:1}}[out.quality]||{layers:45,reuse:2});
@@ -4016,6 +4058,7 @@ function bindPanelResize(handle, cssVar, min, max, invert) {
 }
 
 function setHubView(view) {
+  if(view !== 'assets') $$('#assetCenterGrid audio, #assetCenterGrid video').forEach(media => media.pause());
   hubView = view;
   document.body.classList.toggle('project-open', view === 'editor');
   $('#gallery').classList.toggle('on', view === 'projects');
@@ -4125,6 +4168,30 @@ function renderSideProjects() {
     b.addEventListener('click', () => openProject(p)); wrap.appendChild(b);
   }
 }
+function assetPlaybackControls(media,item,grid) {
+      media.addEventListener('play', () => grid.querySelectorAll('audio,video').forEach(other => { if (other !== media) other.pause(); }));
+      const controls = div('assetAudioControls');
+      controls.addEventListener('keydown', event => event.stopPropagation());
+      const play = document.createElement('button'); play.type = 'button'; play.className = 'assetAudioPlay';
+      const seek = document.createElement('input'); seek.type = 'range'; seek.min = '0'; seek.max = String(item.duration || 1); seek.step = '.1'; seek.value = '0';
+      seek.setAttribute('aria-label', 'Seek ' + (item.name || 'media'));
+      const time = document.createElement('span'); time.className = 'assetAudioTime';
+      const sync = () => {
+        play.textContent = media.paused ? '▶' : 'Ⅱ';
+        play.setAttribute('aria-label', (media.paused ? 'Play ' : 'Pause ') + (item.name || 'media'));
+        play.setAttribute('aria-pressed', String(!media.paused));
+        seek.max = String(Number.isFinite(media.duration) ? media.duration : item.duration || 1);
+        seek.value = String(media.currentTime || 0);
+        time.textContent = fmtDur(media.currentTime || item.duration || 0);
+      };
+      play.addEventListener('click', () => {
+        if (!media.paused) media.pause();
+        else media.play().catch(() => toast('This media could not be played', 'err'));
+      });
+      seek.addEventListener('input', () => { if (media.readyState >= 1) media.currentTime = +seek.value; });
+      ['play','pause','timeupdate','loadedmetadata','ended'].forEach(event => media.addEventListener(event, sync));
+      sync(); controls.append(play, seek, time); return controls;
+}
 async function renderAssetCenter(options={}) {
   const grid = $('#assetCenterGrid'); if (!grid || !state) return;
   const request=++assetLibraryRequest,scroller=$('#assetCenter'),scrollTop=scroller?scroller.scrollTop:0;
@@ -4157,19 +4224,20 @@ async function renderAssetCenter(options={}) {
       art.innerHTML = skillPreviewMarkup({type:'music',icon:'♫'});
       art.setAttribute('aria-hidden', 'true');
       const audio = document.createElement('audio');
-      audio.controls = true; audio.preload = 'none'; audio.src = item.preview;
+      audio.preload = 'none'; audio.src = item.preview; audio.hidden = true;
       audio.setAttribute('aria-label', 'Preview ' + (item.name || 'audio'));
-      audio.addEventListener('play', () => {
-        grid.querySelectorAll('audio').forEach(other => { if (other !== audio) other.pause(); });
-      });
-      thumb.append(art, audio);
+      thumb.append(art, audio, assetPlaybackControls(audio,item,grid));
+    } else if (item.kind === 'video') {
+      thumb.classList.add('assetVideoPreview');
+      const video = document.createElement('video'); video.src = item.playback || item.preview.replace(/\/preview$/, '/source'); video.poster = item.preview; video.preload = 'none'; video.playsInline = true;
+      video.setAttribute('aria-label', 'Preview ' + item.name);
+      thumb.append(video, assetPlaybackControls(video,item,grid));
     } else {
       const el = document.createElement('img'); el.src = item.preview; el.alt = '';
-      if (item.kind === 'video') el.onerror = () => { const v = document.createElement('video'); v.src = item.preview; v.muted = true; v.preload = 'metadata'; v.playsInline = true; el.replaceWith(v); };
       thumb.appendChild(el);
     }
     const meta = div('hubMeta'); const names = item.assignments.map(x => x.name);
-    meta.innerHTML = '<h3></h3><p></p><div class="assetAssignments"></div><button class="assetAssignBtn">Manage projects</button>';
+    meta.innerHTML = '<h3></h3><p></p><div class="assetAssignmentsLabel">Used in projects</div><div class="assetAssignments"></div><button class="assetAssignBtn">Manage projects</button>';
     meta.querySelector('h3').textContent = item.name; meta.querySelector('p').textContent = item.status && item.status !== 'ready' ? item.status : item.kind + (item.duration ? ' · ' + item.duration.toFixed(1) + 's' : '');
     const chips = meta.querySelector('.assetAssignments'); names.forEach(name => { const s = document.createElement('span'); s.textContent = name; chips.appendChild(s); });
     meta.querySelector('.assetAssignBtn').addEventListener('click', e => { e.stopPropagation(); openAssetAssignments(item); });
