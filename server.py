@@ -7,6 +7,7 @@ to a single MP4 via the NLE compositor (nle.py).
 """
 import atexit
 import qwen_image
+from model_readiness import partition_ready
 import hashlib
 import json
 import math
@@ -59,6 +60,9 @@ from h3_prompts import (FPS, MAX_FRAMES, MAX_REFERENCES, PRESETS, SHEET_RECIPES,
                         get_sheet_style, sheet_extract_times, validate_references)
 
 ROOT = Path(__file__).resolve().parent
+os.environ.setdefault("HF_HOME", str(ROOT / "addons" / "huggingface-cache"))
+os.environ.setdefault("UV_CACHE_DIR", str(ROOT / "addons" / "uv-cache"))
+os.environ.setdefault("UV_PYTHON_INSTALL_DIR", str(ROOT / "addons" / "python"))
 VERSION_FILE = ROOT / "VERSION"
 
 def application_identity():
@@ -164,6 +168,13 @@ MODEL_BACKENDS = [
      "source":"https://github.com/multimodal-art-projection/YuE",
      "supports":["lyrics","instrumental","style-tags","abc-score","seed","loras"],
      "sizes_gb":[7.3, 0.53]},
+    {"id":"qwen-image", "name":"Qwen-Image-2.1-Turbo", "provider":"Qwen",
+     "platforms":["darwin-arm64","linux","win32"], "memory_min":32, "disk_gb":35,
+     "stability":"experimental", "install_component":"qwen-image",
+     "summary":"Generate and edit images with ordered character and image references. Eight-step local image generation.",
+     "source":"https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo",
+     "supports":["text-to-image","image-editing","image-references"],
+     "media":"image", "role":"image_generation"},
 ]
 
 def _load_model_registry():
@@ -563,6 +574,13 @@ def model_management_state():
                          "receipt":[str(H3MLX_ROOT.resolve())], "imported":True, "media":"video"}
         installations.append(h3mlx_install); _save_model_registry(registry)
     local_music = yue_local_runtime()
+    image_install = next((item for item in installations if item.get("backend_id") == "qwen-image"), None)
+    if qwen_image.state()["ready"] and not image_install:
+        image_install = {"id":"install-qwen-image-managed", "backend_id":"qwen-image",
+                         "name":"Qwen-Image-2.1-Turbo", "path":str(qwen_image.HOME.resolve()),
+                         "managed":True, "receipt":[str(qwen_image.HOME.resolve())],
+                         "imported":True, "media":"image"}
+        installations.append(image_install); _save_model_registry(registry)
     yue_install = next((item for item in installations if item.get("backend_id") == "yue2"), None)
     if local_music["installed"] and not yue_install:
         hf = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
@@ -593,6 +611,10 @@ def model_management_state():
                            Path(item.get("path") or "").resolve() == formatter_root and
                            formatter_model_available(formatter_path)))
         item["available"] = Path(item.get("path") or "").exists()
+        if item.get("backend_id") == "h3-metal":
+            item["available"] = _h3_model_valid(item.get("path") or "")
+        if item.get("backend_id") == "qwen-image":
+            item["available"] = qwen_image.state()["ready"]
     hw = hardware_profile(); platform_id = hw["platform"]
     catalog = []
     for raw in MODEL_BACKENDS:
@@ -619,6 +641,16 @@ def uninstall_managed_model(installation_id):
     registry = _load_model_registry(); items = registry.get("installations") or []
     item = next((x for x in items if x.get("id") == installation_id), None)
     if not item: raise ValueError("Managed installation not found.")
+    if item.get("backend_id") == "qwen-image":
+        target = Path(item.get("path") or "").resolve()
+        allowed = qwen_image.HOME.resolve()
+        receipt = {str(Path(value).resolve()) for value in item.get("receipt") or []}
+        if not item.get("managed") or target != allowed or str(target) not in receipt:
+            raise ValueError("OpenMagia has no safe managed Qwen Image installation receipt.")
+        if target.exists(): shutil.rmtree(target)
+        registry["installations"] = [x for x in items if x.get("id") != installation_id]
+        _save_model_registry(registry)
+        return {"ok":True, "removed":str(target), "active_removed":False}
     if item.get("backend_id") == "h3mlx":
         target = Path(item.get("path") or "").resolve()
         allowed = H3MLX_ROOT.resolve()
@@ -865,7 +897,7 @@ def run_formatter_command(cmd, timeout=90):
 
 def _h3_model_valid(path):
     root = Path(path).expanduser()
-    return all((root / mode / "transformer" / "config.json").exists() for mode in ("FL2VA", "Ref2VA"))
+    return all(partition_ready(root, mode) for mode in ("FL2VA", "Ref2VA"))
 
 _skill_catalog_cache = {"signature": None, "report": None}
 
@@ -1331,7 +1363,7 @@ def select_model_source(kind, path="", endpoint="", model_id="", role="", token=
             if kind in music_kinds else {}}
 
 def ref2va_available():
-    return (Path(H3_MODEL) / "Ref2VA" / "transformer" / "config.json").exists()
+    return partition_ready(H3_MODEL, "Ref2VA")
 
 for d in (DATA, PROJECTS):
     d.mkdir(parents=True, exist_ok=True)
@@ -4732,6 +4764,7 @@ def _next_music_seed(seed, attempt):
 
 def _run_music_worker_attempt(scene_id, project, compiled, attempt, attempts):
     global progress
+    started_at = time.time()
     waiting_since = time.monotonic()
     while True:
         if _music_scene_gone(project["slug"], scene_id):
@@ -4747,11 +4780,11 @@ def _run_music_worker_attempt(scene_id, project, compiled, attempt, attempts):
                 raise TimeoutError("The music runtime stayed occupied by another song for too long.") from exc
             progress[scene_id] = {"phase": "waiting for music worker", "completed": 0,
                                   "total": 1, "engine": "yue2", "attempt": attempt,
-                                  "attempts": attempts}
+                                  "attempts": attempts, "started_at": started_at}
             time.sleep(MUSIC_POLL_SECONDS)
     worker_id = str(job.get("id") or "")
     progress[scene_id] = {"phase": "queued", "completed": 0, "total": 1, "engine": "yue2",
-                          "attempt": attempt, "attempts": attempts}
+                          "attempt": attempt, "attempts": attempts, "started_at": started_at}
     last_seen = time.monotonic()
     last_phase = ""
     last_step = None
@@ -4782,13 +4815,14 @@ def _run_music_worker_attempt(scene_id, project, compiled, attempt, attempts):
                 latest = load_project_slug(project["slug"])
                 live = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
                 if live is not None:
+                    live["status"] = "running"
                     live["music"] = {"job": worker_id, "phase": phase, "attempt": attempt,
                                      "attempts": attempts, "plan_mode": audit["plan_mode"],
                                      "estimated_seconds": audit["estimated_seconds"]}
                     save_project(latest)
         progress[scene_id] = {"phase": phase.lower(), "completed": step.get("completed") or 0,
                               "total": step.get("total") or 0, "engine": "yue2",
-                              "attempt": attempt, "attempts": attempts}
+                              "attempt": attempt, "attempts": attempts, "started_at": started_at}
         if status == "ready":
             return worker_id, state
         if status in ("error", "cancelled"):
@@ -5061,10 +5095,14 @@ def run_job(scene_id, project):
     if ref2va and generation_refs:
         cmd += h3_reference_args(generation_refs)
     # first-frame: chaining takes priority; otherwise FL2VA anchors the face
-    if chain_frame:
-        cmd += ["--first-frame", str(chain_frame)]
-    elif (not ref2va) and chars:
-        cmd += ["--first-frame", str(chars[0]["paths"][0])]
+    anchor = chain_frame or (chars[0]["paths"][0] if (not ref2va) and chars else None)
+    if anchor:
+        # Native H3 stretches frame anchors. Pre-fit with a proportional crop
+        # so changing output aspect ratio cannot squash faces or objects.
+        fitted = nle.fit_generation_anchor(
+            anchor, pdir / "media" / "thumbs" / f"anchor-{scene_id}.png",
+            scene["params"]["width"], scene["params"]["height"])
+        cmd += ["--first-frame", str(fitted)]
     if scene.get("params", {}).get("stability_adjusted"):
         # Native h3.c controls specifically intended for long temporal runs:
         # refresh the expensive core less often and halve middle-block video
@@ -5805,7 +5843,7 @@ class Handler(BaseHTTPRequestHandler):
                     "h3_bin": H3_BIN, "h3_bin_ok": Path(H3_BIN).exists(),
                     "h3_backend": "h3mlx" if using_h3mlx() else "h3-metal",
                     "model_root": H3_MODEL,
-                    "fl2va": (Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json").exists(),
+                    "fl2va": partition_ready(H3_MODEL, "FL2VA"),
                     "ref2va": ref2va_available(),
                     "media_dir": str(proj_dir(proj["slug"]) / "media"),
                     "timeline_end": round(timeline_end(proj), 3),

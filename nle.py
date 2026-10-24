@@ -63,6 +63,20 @@ def probe(path):
             "h": int(st.get("height") or 0), "hasAudio": has_audio}
 
 
+def fit_generation_anchor(src, out, width, height):
+    """Center-crop an opening frame to output geometry without stretching it."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    result = run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                  "-frames:v", "1", "-vf",
+                  f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase:flags=lanczos,"
+                  f"crop={int(width)}:{int(height)},setsar=1",
+                  "-update", "1", str(out)])
+    if result.returncode != 0 or not out.is_file():
+        raise RuntimeError("Could not prepare the opening frame without distorting its proportions.")
+    return out
+
+
 def make_thumb(src, out, max_w=320):
     """Extract a single poster frame from a video to a small JPEG."""
     out = Path(out)

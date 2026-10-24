@@ -231,6 +231,7 @@ class ParamsAndScene(unittest.TestCase):
         self.assertEqual("job-2", worker_id)
         self.assertEqual("ready", state["status"])
         self.assertEqual(3, call.call_count)
+        self.assertGreater(server.progress["scene"]["started_at"], 0)
 
     def test_only_candidate_quality_failures_retry(self):
         for message in ("truncated output", "invalid score at bar 4",

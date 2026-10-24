@@ -42,6 +42,7 @@ class ModelManagementTests(unittest.TestCase):
              mock.patch.object(server, "H3_MODEL", str(Path(td) / "missing-model")), \
              mock.patch.object(server, "H3MLX_BIN", Path(td) / "missing-h3mlx"), \
              mock.patch.object(server, "FORMATTER_MODEL", str(Path(td) / "missing-formatter.gguf")), \
+             mock.patch.object(server.qwen_image, "state", return_value={"ready": False}), \
              mock.patch.object(server, "yue_local_runtime", return_value={
                  "installed": False, "present": False, "ready": False,
                  "device": "", "reason": "not installed",
@@ -54,10 +55,10 @@ class ModelManagementTests(unittest.TestCase):
         self.assertTrue(next(item for item in state["catalog"] if item["recommended"])["installed"] is False)
 
     def test_only_integrated_backend_is_advertised_as_installable(self):
-        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal", "h3mlx", "yue2"])
+        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal", "h3mlx", "yue2", "qwen-image"])
         # Every advertised backend states which medium it actually produces, and
         # nothing is offered as installable without an execution path behind it.
-        self.assertEqual([item.get("media") for item in server.MODEL_BACKENDS], ["video", "video", "music"])
+        self.assertEqual([item.get("media") for item in server.MODEL_BACKENDS], ["video", "video", "music", "image"])
         self.assertTrue(all(item.get("install_component") for item in server.MODEL_BACKENDS))
         self.assertEqual(server.MODEL_BACKENDS[0]["install_component"], "h3")
         self.assertEqual(server.MODEL_BACKENDS[1]["install_component"], "h3mlx")

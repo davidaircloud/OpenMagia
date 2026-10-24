@@ -11,6 +11,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="${OPENMAGIA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+export HF_HOME="${HF_HOME:-$SCRIPT_DIR/addons/huggingface-cache}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRIPT_DIR/addons/uv-cache}"
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$SCRIPT_DIR/addons/python}"
 
 # Standard layout: everything lives inside the OpenMagia folder.
 #   OpenMagia/h3.c            the engine
@@ -210,7 +213,8 @@ if [[ "$WANT_H3MLX" -eq 1 ]]; then
   have git || { err "git is required to install H3MLX"; exit 1; }
   if [[ ! -d "$H3MLX_DIR/.git" ]]; then
     log "downloading the experimental H3MLX engine ..."
-    git clone --depth 1 https://github.com/robzombai/h3mlx.git "$H3MLX_DIR"
+    git clone --depth 1 --filter=blob:none --sparse https://github.com/robzombai/h3mlx.git "$H3MLX_DIR"
+    git -C "$H3MLX_DIR" sparse-checkout set h3-lora-lab
   elif [[ "$UPDATE_SOURCES" -eq 1 ]]; then
     log "checking H3MLX for updates ..."
     git -C "$H3MLX_DIR" pull --ff-only
@@ -221,14 +225,7 @@ if [[ "$WANT_H3MLX" -eq 1 ]]; then
   # before video decoding fails. Patch the managed source until upstream adds
   # the missing registry entry.
   H3MLX_GPU_SOURCE="$H3MLX_DIR/h3-lora-lab/h3_gpu.m"
-  if ! grep -Fq '@"h3_video_qkv_rope_f32", @"h3_video_qkv_rope_bf16"' "$H3MLX_GPU_SOURCE"; then
-    sed -i.bak 's/@"h3_video_qkv_rope_f32",/@"h3_video_qkv_rope_f32", @"h3_video_qkv_rope_bf16",/' "$H3MLX_GPU_SOURCE"
-    rm -f "$H3MLX_GPU_SOURCE.bak"
-  fi
-  if ! grep -Fq '@"h3_scale_add_f32", @"h3_scale_add_bf16", @"h3_bias_add_bf16"' "$H3MLX_GPU_SOURCE"; then
-    sed -i.bak 's/@"h3_scale_add_f32",/@"h3_scale_add_f32", @"h3_scale_add_bf16", @"h3_bias_add_bf16",/' "$H3MLX_GPU_SOURCE"
-    rm -f "$H3MLX_GPU_SOURCE.bak"
-  fi
+  python3 "$SCRIPT_DIR/scripts/patch_h3mlx_registry.py" "$H3MLX_GPU_SOURCE"
   python3 "$SCRIPT_DIR/scripts/validate_h3mlx_registry.py" "$H3MLX_GPU_SOURCE" || {
     err "H3MLX has unregistered Metal pipelines required at runtime"
     exit 1
@@ -282,8 +279,8 @@ log "wrote $SCRIPT_DIR/config.json"
 mkdir -p "$MODEL_ROOT"
 log "note: re-running this script resumes any interrupted download"
 fl2va_ok=0; ref2va_ok=0
-[[ -f "$MODEL_ROOT/FL2VA/transformer/config.json" ]] && fl2va_ok=1
-[[ -f "$MODEL_ROOT/Ref2VA/transformer/config.json" ]] && ref2va_ok=1
+python3 "$SCRIPT_DIR/model_readiness.py" "$MODEL_ROOT" FL2VA && fl2va_ok=1
+python3 "$SCRIPT_DIR/model_readiness.py" "$MODEL_ROOT" Ref2VA && ref2va_ok=1
 
 if [[ "$WANT_MODELS" -eq 0 ]]; then
   log "skipping MiniMax H3 checkpoints"
@@ -292,14 +289,14 @@ elif [[ "$fl2va_ok" -eq 1 ]]; then
 else
   log "downloading FL2VA (~134 GB) from $HF_REPO ..."
   hf_download "$HF_REPO" --include "FL2VA/*" --local-dir "$MODEL_ROOT"
-  [[ -f "$MODEL_ROOT/FL2VA/transformer/config.json" ]] || { err "FL2VA download incomplete"; exit 1; }
+  python3 "$SCRIPT_DIR/model_readiness.py" "$MODEL_ROOT" FL2VA || { err "FL2VA download incomplete"; exit 1; }
   log "FL2VA checkpoint ready"
 fi
 
 if [[ "$WANT_MODELS" -eq 1 && "$WANT_REF2VA" -eq 1 && "$ref2va_ok" -eq 0 ]]; then
   log "downloading Ref2VA (~144 GB) from $HF_REPO ..."
   hf_download "$HF_REPO" --include "Ref2VA/*" --local-dir "$MODEL_ROOT"
-  [[ -f "$MODEL_ROOT/Ref2VA/transformer/config.json" ]] && ref2va_ok=1
+  python3 "$SCRIPT_DIR/model_readiness.py" "$MODEL_ROOT" Ref2VA && ref2va_ok=1
   [[ "$ref2va_ok" -eq 1 ]] && log "Ref2VA checkpoint ready" || { err "Ref2VA download incomplete"; exit 1; }
 elif [[ "$ref2va_ok" -eq 1 ]]; then
   log "Ref2VA checkpoint present"
@@ -314,6 +311,14 @@ if [[ "$WANT_YUE" -eq 0 ]]; then
   log "skipping the YuE 2 music runtime (add --with-yue to make music here)"
 else
   have git || { err "git is required to install the YuE 2 runtime"; exit 1; }
+  if ! have uv; then
+    UV_BOOTSTRAP="$YUE_DIR/installer"
+    if [[ ! -x "$UV_BOOTSTRAP/bin/uv" ]]; then
+      python3 -m venv "$UV_BOOTSTRAP"
+      "$UV_BOOTSTRAP/bin/python" -m pip install --disable-pip-version-check uv
+    fi
+    export PATH="$UV_BOOTSTRAP/bin:$PATH"
+  fi
   if [[ ! -f "$YUE_SRC_DIR/pyproject.toml" ]]; then
     log "downloading the YuE 2 runtime ..."
     git clone --depth 1 https://github.com/multimodal-art-projection/YuE.git "$YUE_SRC_DIR"

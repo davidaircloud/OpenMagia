@@ -17,7 +17,7 @@ class ModelInstallerTests(unittest.TestCase):
         return process
 
     def test_h3mlx_installer_registers_the_bf16_video_vae_pipeline(self):
-        script = (server.ROOT / "install.sh").read_text()
+        script = (server.ROOT / "install.sh").read_text() + (server.ROOT / "scripts/patch_h3mlx_registry.py").read_text()
         self.assertIn('h3_video_qkv_rope_bf16', script)
         self.assertIn('h3_scale_add_bf16', script)
         self.assertIn('h3_bias_add_bf16', script)
@@ -35,6 +35,25 @@ class ModelInstallerTests(unittest.TestCase):
         self.assertEqual(validator.missing_pipelines(complete), [])
         self.assertEqual(validator.missing_pipelines(complete.replace('@"h3_one" ]', '@"h3_other" ]')),
                          ["h3_one"])
+
+    def test_h3mlx_registry_patch_preserves_calls_and_repairs_older_installs(self):
+        import importlib.util
+        path = server.ROOT / "scripts" / "patch_h3mlx_registry.py"
+        spec = importlib.util.spec_from_file_location("h3mlx_patch", path)
+        patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
+        registry = ('NSMutableArray<NSString *> *names = [@[ @"h3_scale_add_f32", '
+                    '@"h3_video_qkv_rope_f32" ] mutableCopy];\ngpu.pipelines = pipelines;\n')
+        calls = ('return h3_gpu_dispatch_2d(gpu, @"h3_scale_add_f32", width, rows, bindings);\n'
+                 'return h3_gpu_dispatch_3d(gpu, @"h3_video_qkv_rope_f32", grid, bindings);\n')
+        fixed = patch.patch_source(registry + calls)
+        self.assertTrue(fixed.endswith(calls))
+        self.assertIn('@"h3_bias_add_bf16"', fixed)
+        self.assertEqual(patch.patch_source(fixed), fixed)
+        broken = calls.replace('@"h3_scale_add_f32",',
+            '@"h3_scale_add_f32", @"h3_scale_add_bf16", @"h3_bias_add_bf16",')
+        broken = broken.replace('@"h3_video_qkv_rope_f32",',
+            '@"h3_video_qkv_rope_f32", @"h3_video_qkv_rope_bf16",')
+        self.assertEqual(patch.patch_source(registry + broken), fixed)
 
     def test_h3_runs_immutable_bash_snapshot(self):
         original = (server.ROOT / "install.sh").read_bytes()

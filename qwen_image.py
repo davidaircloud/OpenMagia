@@ -17,8 +17,16 @@ def state():
 
 def install(report):
     import shutil
-    uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
     HOME.mkdir(parents=True, exist_ok=True)
+    uv = shutil.which("uv")
+    if not uv:
+        bootstrap = HOME / "installer"
+        uv = str(bootstrap / ("Scripts/uv.exe" if os.name == "nt" else "bin/uv"))
+        if not Path(uv).is_file():
+            report("Preparing the isolated image installer…")
+            subprocess.run([sys.executable, "-m", "venv", str(bootstrap)], check=True)
+            python = bootstrap / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            subprocess.run([str(python), "-m", "pip", "install", "uv"], check=True)
     commands = [[uv, "venv", "--python", "3.12", str(HOME / "runtime")],
                 [uv, "pip", "install", "--python", str(PYTHON), "torch", "torchvision", "accelerate", "pillow", "transformers>=5.17.0", "git+https://github.com/huggingface/diffusers.git@d42ebf9c6e0b46103b74283f5324357a67acaa04"],
                 [str(PYTHON), str(Path(__file__)), "download"]]
