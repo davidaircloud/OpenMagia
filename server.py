@@ -5391,10 +5391,12 @@ def recover_queue(project):
                 active_job = None
             else:
                 return
-        latest = load_project_slug(project["slug"])
         changed = False
         persisted = []
         with lock:
+            # Read under the same lock used by workers to commit completion.
+            # A snapshot from before this lock can resurrect a finished sheet.
+            latest = load_project_slug(project["slug"])
             for scene in latest.get("scenes", []):
                 if scene.get("status") not in ("queued", "running"):
                     continue
@@ -5566,6 +5568,8 @@ def pump_sheet_queue(project):
 def enqueue_sheet(sheet_id, project):
     global sheet_active
     with job_lock:
+        if sheet_active == sheet_id:
+            return
         if sheet_id not in sheet_queue:
             sheet_queue.append(sheet_id)
         with lock:

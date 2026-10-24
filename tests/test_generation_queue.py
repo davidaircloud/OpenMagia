@@ -7,6 +7,38 @@ import server
 
 
 class GenerationQueueTests(unittest.TestCase):
+    def test_sheet_completion_during_recovery_cannot_be_resurrected(self):
+        import copy
+        persisted = {"slug": "test", "scenes": [], "media": [],
+                     "sheets": [{"id": "sheet", "status": "running"}]}
+        class CompletionLock:
+            def __enter__(inner):
+                persisted["sheets"] = []
+                persisted["characters"] = [{"id": "saved-cast"}]
+                server.sheet_active = None
+            def __exit__(inner, *args):
+                return False
+        with mock.patch.object(server, "active_job", None), \
+             mock.patch.object(server, "sheet_active", "sheet"), \
+             mock.patch.object(server, "sheet_queue", []), \
+             mock.patch.object(server, "queue", []), \
+             mock.patch.object(server, "lock", CompletionLock()), \
+             mock.patch.object(server, "load_project_slug", side_effect=lambda slug: copy.deepcopy(persisted)), \
+             mock.patch.object(server, "save_project") as save, \
+             mock.patch.object(server, "pump_sheet_queue") as pump:
+            server.recover_queue({"slug": "test"})
+            save.assert_not_called()
+            pump.assert_not_called()
+            self.assertEqual([], server.sheet_queue)
+
+    def test_active_sheet_cannot_be_enqueued_twice(self):
+        with mock.patch.object(server, "sheet_active", "sheet"), \
+             mock.patch.object(server, "sheet_queue", []), \
+             mock.patch.object(server, "save_project") as save:
+            server.enqueue_sheet("sheet", {"sheets": [{"id": "sheet", "status": "running"}]})
+            self.assertEqual([], server.sheet_queue)
+            save.assert_not_called()
+
     def test_music_completion_releases_slot_before_pumping_next_song(self):
         project = {"slug": "test", "scenes": [{"id": "song", "status": "running"}], "media": []}
         previous = server.active_job
