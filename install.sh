@@ -290,6 +290,7 @@ else
   log "downloading FL2VA (~134 GB) from $HF_REPO ..."
   hf_download "$HF_REPO" --include "FL2VA/*" --local-dir "$MODEL_ROOT"
   python3 "$SCRIPT_DIR/model_readiness.py" "$MODEL_ROOT" FL2VA || { err "FL2VA download incomplete"; exit 1; }
+  fl2va_ok=1
   log "FL2VA checkpoint ready"
 fi
 
