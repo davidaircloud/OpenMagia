@@ -1063,5 +1063,5 @@ footer.maximized{left:82px}
 #timelineMagiaStack:empty{display:none}#timelineMagiaStack h3{font-size:13px}.timelineMagiaRecipes>label{font-size:12px;font-weight:650}
 
 /* Native dialog stays usable when embedded browsers suppress window.prompt. */
-#newProjectDialog{width:min(420px,calc(100vw - 40px));box-sizing:border-box;padding:26px;border:1px solid #34343a;border-radius:16px;background:#18181b;color:#f4f4f5;box-shadow:0 24px 90px #0008}
+#newProjectDialog{position:fixed;inset:0;margin:auto;max-height:calc(100dvh - 40px);overflow:auto;width:min(420px,calc(100vw - 40px));box-sizing:border-box;padding:26px;border:1px solid #34343a;border-radius:16px;background:#18181b;color:#f4f4f5;box-shadow:0 24px 90px #0008}
 #newProjectDialog::backdrop{background:#0009}#newProjectDialog h2{margin:0 0 24px;font-size:20px}#newProjectDialog label{display:block;margin-bottom:8px;font-size:13px;color:#a1a1aa}#newProjectDialog input{width:100%;box-sizing:border-box}#newProjectDialog .newProjectActions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}#newProjectDialog .newProjectError{color:#fca5a5;font-size:13px;min-height:0;margin:12px 0 0}#newProjectDialog .newProjectError:empty{display:none}
