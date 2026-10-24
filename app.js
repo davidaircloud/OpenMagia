@@ -3632,17 +3632,38 @@ function openProject(p) {
 }
 
 function newProject() {
-  const name = prompt('Project name', 'Untitled');
-  if (name === null) return;
-  api('/api/projects', { method: 'POST', body: { name: name.trim() || 'Untitled' } })
-    .then(() => {
+  if ($('#newProjectDialog')) return;
+  const dialog = document.createElement('dialog');
+  dialog.id = 'newProjectDialog';
+  dialog.setAttribute('aria-labelledby', 'newProjectTitle');
+  dialog.innerHTML = '<form><h2 id="newProjectTitle">New project</h2><label for="newProjectName">Project name</label><input class="txt" id="newProjectName" name="name" value="Untitled" maxlength="160" autocomplete="off"><p class="newProjectError" role="alert"></p><div class="newProjectActions"><button class="btn" type="button">Cancel</button><button class="btn primary" type="submit">Create project</button></div></form>';
+  document.body.appendChild(dialog);
+  const form = dialog.querySelector('form'), input = dialog.querySelector('input');
+  const cancel = dialog.querySelector('[type="button"]'), submit = dialog.querySelector('[type="submit"]');
+  let saving = false;
+  dialog.addEventListener('close', () => { dialog.remove(); $('#galleryNew').focus(); });
+  dialog.addEventListener('cancel', e => { if (saving) e.preventDefault(); });
+  dialog.addEventListener('keydown', e => e.stopPropagation());
+  cancel.addEventListener('click', () => dialog.close());
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (saving) return;
+    saving = true; submit.disabled = cancel.disabled = input.disabled = true;
+    submit.textContent = 'Creating…';
+    try {
+      await api('/api/projects', { method: 'POST', body: { name: input.value.trim() || 'Untitled' } });
       sel = null; playTime = 0; selChars = new Set(); selRefs = new Set(); selectedCharRefs = new Map(); selCharsInitialized = false;
       Object.keys(videoEls).forEach(k => { videoEls[k].remove(); delete videoEls[k]; });
       Object.keys(audioEls).forEach(k => { if(audioGains[k])audioGains[k].disconnect();delete audioGains[k];audioEls[k].remove(); delete audioEls[k]; });
-      renderGallery();
-      refresh();
-    })
-    .catch(e => toast(e.message, 'err'));
+      dialog.close(); closeGallery();
+      await refresh();
+    } catch (error) {
+      dialog.querySelector('.newProjectError').textContent = error.message || 'Could not create the project. Please try again.';
+      saving = false; submit.disabled = cancel.disabled = input.disabled = false;
+      submit.textContent = 'Create project'; input.focus();
+    }
+  });
+  dialog.showModal(); input.focus(); input.select();
 }
 
 function renameProject(p) {
