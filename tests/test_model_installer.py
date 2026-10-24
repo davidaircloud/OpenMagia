@@ -16,6 +16,26 @@ class ModelInstallerTests(unittest.TestCase):
         process.wait.return_value = returncode
         return process
 
+    def test_h3mlx_installer_registers_the_bf16_video_vae_pipeline(self):
+        script = (server.ROOT / "install.sh").read_text()
+        self.assertIn('h3_video_qkv_rope_bf16', script)
+        self.assertIn('h3_scale_add_bf16', script)
+        self.assertIn('h3_bias_add_bf16', script)
+        self.assertIn('H3MLX_GPU_SOURCE', script)
+        self.assertIn('validate_h3mlx_registry.py', script)
+
+    def test_h3mlx_registry_validator_detects_every_missing_dispatch(self):
+        import importlib.util
+        path = server.ROOT / "scripts" / "validate_h3mlx_registry.py"
+        spec = importlib.util.spec_from_file_location("h3mlx_registry", path)
+        validator = importlib.util.module_from_spec(spec); spec.loader.exec_module(validator)
+        complete = ('NSMutableArray<NSString *> *names = [@[ @"h3_one" ] mutableCopy];\n'
+                    'gpu.pipelines = pipelines;\n'
+                    'h3_gpu_dispatch_1d(gpu, @"h3_one", elements, nil, nil, 0);')
+        self.assertEqual(validator.missing_pipelines(complete), [])
+        self.assertEqual(validator.missing_pipelines(complete.replace('@"h3_one" ]', '@"h3_other" ]')),
+                         ["h3_one"])
+
     def test_h3_runs_immutable_bash_snapshot(self):
         original = (server.ROOT / "install.sh").read_bytes()
 
@@ -56,6 +76,14 @@ class ModelInstallerTests(unittest.TestCase):
             server.install_model_component("formatter")
         self.assertFalse(Path(captured["snapshot"]).exists())
         self.assertEqual(server.model_installs["formatter"]["status"], "ready")
+
+    def test_h3mlx_installs_only_the_optional_engine(self):
+        def completed(args, **kwargs):
+            self.assertEqual(args[2:], ["--no-models", "--no-h3", "--no-formatter", "--with-h3mlx"])
+            return self.process("H3MLX engine ready\n")
+        with mock.patch.object(server.subprocess, "Popen", side_effect=completed):
+            server.install_model_component("h3mlx")
+        self.assertEqual(server.model_installs["h3mlx"]["status"], "ready")
 
     def test_formatter_update_checks_only_its_sources(self):
         def completed(args, **kwargs):

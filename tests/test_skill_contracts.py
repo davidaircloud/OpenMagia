@@ -135,6 +135,24 @@ class SkillContractTests(unittest.TestCase):
         self.assertTrue(used_ai)
         self.assertIn("Apollo-era lunar realism", refined)
 
+    @mock.patch.object(server, "run_formatter_command")
+    @mock.patch.object(server, "formatter_available", return_value=True)
+    def test_scene_refinement_removes_duplicated_cut_ranges(self, _available, run):
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout=("OPENMAGIA_RESULT_BEGIN\n"
+                    "CUT 01 | 0.00-1.17s -0.00-1.17s: The subject descends. "
+                    "CUT 02 | 1.17-2.33s -1.17-2.33s: The subject lands.\n"
+                    "OPENMAGIA_RESULT_END"),
+        )
+        refined, used_ai = server.improve_idea_locally(
+            "The subject descends and lands.", {"_duration_seconds": 2.33, "cuts": 2}
+        )
+        self.assertTrue(used_ai)
+        self.assertIn("CUT 01 | 0.00-1.17s - The subject descends.", refined)
+        self.assertIn("CUT 02 | 1.17-2.33s - The subject lands.", refined)
+        self.assertNotIn("-0.00-1.17s", refined)
+
 
 if __name__ == "__main__":
     unittest.main()

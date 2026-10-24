@@ -35,6 +35,15 @@ class H3PromptTests(unittest.TestCase):
         self.assertIn(style, visual)
         self.assertNotIn(style, prompt.split("overall_soundscape:", 1)[1])
 
+    def test_lunar_exterior_uses_vacuum_appropriate_default_sound(self):
+        prompt = format_prompt(
+            idea="An astronaut steps from the lunar module onto the moon surface.",
+            style="Apollo-era documentary realism.", frames=120,
+        )
+        self.assertIn("near-silence in the lunar vacuum", prompt)
+        self.assertIn("suit breathing", prompt)
+        self.assertNotIn("detailed environmental ambience", prompt)
+
     def test_ref_field_order_and_labels(self):
         chars = [{"name": "AO", "paths": ["a.png", "b.png"]}]
         prompt = format_prompt(idea="AO jumps.", style="Anime.", frames=312,

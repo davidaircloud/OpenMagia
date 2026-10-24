@@ -6,6 +6,7 @@ generation (which feeds clips into the base track), and exports the timeline
 to a single MP4 via the NLE compositor (nle.py).
 """
 import atexit
+import qwen_image
 import hashlib
 import json
 import math
@@ -111,6 +112,8 @@ DEFAULTS = {
     "formatter_bin": str(ROOT / "addons" / "llama.cpp" / "build" / "bin" / "llama-cli"),
     "formatter_model": str(DEFAULT_FORMATTER_MODEL),
 }
+H3MLX_ROOT = ROOT / "addons" / "h3mlx"
+H3MLX_BIN = H3MLX_ROOT / "h3-lora-lab" / "h3"
 def _load_config():
     cfg = dict(DEFAULTS)
     if CONFIG_FILE.exists():
@@ -148,6 +151,11 @@ MODEL_BACKENDS = [
      "memory_min":64, "disk_gb":278, "stability":"stable", "install_component":"h3",
      "summary":"Native Apple Silicon generation with text, first/last-frame, and ordered references.",
      "source":"https://github.com/antirez/h3.c", "supports":["t2va","fl2va","ref2va","audio-references"],
+     "media":"video", "role":"video_generation"},
+    {"id":"h3mlx", "name":"MiniMax H3 · H3MLX", "provider":"RobZombAI", "platforms":["darwin-arm64"],
+     "memory_min":64, "disk_gb":1, "stability":"experimental", "install_component":"h3mlx",
+     "summary":"Experimental Apple Silicon engine with alternate Metal kernels and few-step Frontier sampling. Reuses the installed MiniMax H3 weights.",
+     "source":"https://github.com/robzombai/h3mlx", "supports":["t2va","fl2va","ref2va","audio-references"],
      "media":"video", "role":"video_generation"},
     {"id":"yue2", "name":"YuE 2 · music", "provider":"m-a-p", "platforms":["darwin-arm64","darwin","linux","win32"],
      "memory_min":16, "disk_gb":12, "stability":"stable", "install_component":"yue",
@@ -547,6 +555,13 @@ def model_management_state():
                     "name":"MiniMax H3 · OpenMagia", "path":active_path, "managed":managed,
                     "receipt":[active_path] if managed else [], "imported":True}
         installations.append(existing); _save_model_registry(registry)
+    h3mlx_install = next((item for item in installations if item.get("backend_id") == "h3mlx"), None)
+    if H3MLX_BIN.is_file() and not h3mlx_install:
+        h3mlx_install = {"id":"install-h3mlx-managed", "backend_id":"h3mlx",
+                         "name":"MiniMax H3 · H3MLX", "path":str(H3MLX_ROOT.resolve()),
+                         "engine_path":str(H3MLX_BIN.resolve()), "managed":True,
+                         "receipt":[str(H3MLX_ROOT.resolve())], "imported":True, "media":"video"}
+        installations.append(h3mlx_install); _save_model_registry(registry)
     local_music = yue_local_runtime()
     yue_install = next((item for item in installations if item.get("backend_id") == "yue2"), None)
     if local_music["installed"] and not yue_install:
@@ -570,7 +585,10 @@ def model_management_state():
         installations.append(formatter_install); _save_model_registry(registry)
     for item in installations:
         item["active"] = ((item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or
-                          item.get("path") == active_path or
+                          (item.get("backend_id") == "h3mlx" and
+                           str(Path(H3_BIN).expanduser().resolve()) == str(H3MLX_BIN.resolve())) or
+                          (item.get("backend_id") == "h3-metal" and item.get("path") == active_path and
+                           str(Path(H3_BIN).expanduser().resolve()) != str(H3MLX_BIN.resolve())) or
                           (item.get("backend_id") == "qwen2.5-7b" and
                            Path(item.get("path") or "").resolve() == formatter_root and
                            formatter_model_available(formatter_path)))
@@ -597,10 +615,26 @@ def model_management_state():
             "music":music}
 
 def uninstall_managed_model(installation_id):
-    global H3_MODEL, FORMATTER_MODEL
+    global H3_BIN, H3_MODEL, FORMATTER_MODEL
     registry = _load_model_registry(); items = registry.get("installations") or []
     item = next((x for x in items if x.get("id") == installation_id), None)
     if not item: raise ValueError("Managed installation not found.")
+    if item.get("backend_id") == "h3mlx":
+        target = Path(item.get("path") or "").resolve()
+        allowed = H3MLX_ROOT.resolve()
+        receipt = {str(Path(value).resolve()) for value in item.get("receipt") or []}
+        if not item.get("managed") or target != allowed or str(target) not in receipt:
+            raise ValueError("OpenMagia has no safe managed H3MLX installation receipt.")
+        was_active = str(Path(H3_BIN).expanduser().resolve()) == str(H3MLX_BIN.resolve())
+        if target.exists(): shutil.rmtree(target)
+        registry["installations"] = [x for x in items if x.get("id") != installation_id]
+        _save_model_registry(registry)
+        if was_active:
+            H3_BIN = str(DEFAULTS["h3_bin"])
+            _saved_model_sources.pop("h3_bin", None)
+            MODEL_SOURCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MODEL_SOURCE_FILE.write_text(json.dumps(_saved_model_sources, indent=2) + "\n")
+        return {"ok":True, "removed":str(target), "active_removed":was_active}
     if item.get("backend_id") == "yue2":
         stop_local_worker()
         allowed = {str(YUE_LOCAL_DIR.resolve())}
@@ -792,6 +826,7 @@ def _load_model_sources():
 
 _saved_model_sources = _load_model_sources()
 H3_MODEL = str(_saved_model_sources.get("h3_model") or H3_MODEL)
+H3_BIN = str(_saved_model_sources.get("h3_bin") or H3_BIN)
 FORMATTER_MODEL = str(_saved_model_sources.get("formatter_model") or FORMATTER_MODEL)
 FORMATTER_ENDPOINT = str(_saved_model_sources.get("formatter_endpoint") or "")
 FORMATTER_MODEL_ID = str(_saved_model_sources.get("formatter_model_id") or "")
@@ -1243,17 +1278,24 @@ def discover_model_sources():
     return found
 
 def select_model_source(kind, path="", endpoint="", model_id="", role="", token=""):
-    global H3_MODEL, FORMATTER_MODEL, FORMATTER_ENDPOINT, FORMATTER_MODEL_ID
+    global H3_BIN, H3_MODEL, FORMATTER_MODEL, FORMATTER_ENDPOINT, FORMATTER_MODEL_ID
     supplied = Path(path).expanduser()
     candidate = supplied.resolve()
     music_kinds = {"yue_local", "yue_worker", "yue_off"}
-    expected_role = "video_generation" if kind == "h3" else (
+    expected_role = "video_generation" if kind in {"h3", "h3_backend"} else (
         "music_generation" if kind in music_kinds else "prompt_refinement")
     if role and role != expected_role:
         raise ValueError("That model is not compatible with the selected OpenMagia role.")
     if kind == "h3":
         if not _h3_model_valid(candidate): raise ValueError("That folder is not a complete MiniMax H3 FL2VA + Ref2VA model.")
         H3_MODEL = str(candidate); _saved_model_sources["h3_model"] = H3_MODEL
+    elif kind == "h3_backend":
+        backend = next((item for item in MODEL_BACKENDS if item.get("id") == model_id and item.get("media") == "video"), None)
+        if not backend: raise ValueError("That video backend is not registered.")
+        engine = H3MLX_BIN if model_id == "h3mlx" else Path(DEFAULTS["h3_bin"])
+        if not engine.is_file(): raise ValueError("Install that video backend before selecting it.")
+        H3_BIN = str(engine.resolve())
+        _saved_model_sources["h3_bin"] = H3_BIN
     elif kind == "formatter_file":
         if not candidate.is_file() or supplied.suffix.lower() != ".gguf": raise ValueError("Prompt refinement requires a readable GGUF model file.")
         FORMATTER_MODEL = str(supplied.absolute()); FORMATTER_ENDPOINT = ""; FORMATTER_MODEL_ID = ""
@@ -1348,6 +1390,55 @@ def safe_retry_params(params):
     fallback["stability_reason"] = "The requested schedule stalled, so OpenMagia retried once with the stable memory schedule."
     return fallback
 
+
+def using_h3mlx():
+    """Return whether the optional H3MLX executable owns video generation."""
+    try:
+        return Path(H3_BIN).expanduser().resolve() == H3MLX_BIN.resolve()
+    except OSError:
+        return False
+
+
+def h3mlx_generation_params(params):
+    """Use a schedule H3MLX can finish reliably with the stock H3 weights.
+
+    H3MLX rejects fewer than 35 transformer layers. Its accelerated path is
+    intended to reduce denoising work, however, so a 50-step or 50-layer
+    suggestion is a poor default. Keep at most 30 denoising steps and the
+    legal 35-layer floor while preserving dimensions, frames and seed.
+    """
+    adjusted = dict(params or {})
+    adjusted["steps"] = min(30, int(adjusted.get("steps", 20)))
+    adjusted["layers"] = 35
+    adjusted["reuse"] = max(1, min(2, int(adjusted.get("reuse", 2))))
+    adjusted["backend_adjusted"] = "h3mlx"
+    return adjusted
+
+
+def parse_h3_progress_line(line):
+    """Parse native H3/H3MLX progress, including carriage-return updates."""
+    clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(line or ""))
+    # H3MLX renders "phase [bar] 10% (3/30)" while upstream H3 renders
+    # "phase 3/30". Locate the counter first, then recover the phase from the
+    # text before its progress bar.
+    counter = re.search(r"(\d+)\s*/\s*(\d+)", clean)
+    if not counter:
+        return None
+    prefix = clean[:counter.start()]
+    phase_match = re.search(r"([A-Za-z][A-Za-z0-9 _-]*?)\s*\[", prefix)
+    if not phase_match:
+        phase_match = re.search(r"([A-Za-z][A-Za-z0-9 _-]*?)\s*$", prefix)
+    match = phase_match
+    if not match:
+        return None
+    return {"phase": match.group(1).strip(), "completed": int(counter.group(1)),
+            "total": int(counter.group(2))}
+
+
+def clean_h3_output(line):
+    """Remove terminal redraw controls before persisting native errors."""
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", str(line or "")).replace("\r", "").strip()
+
 def terminate_process_tree(proc, timeout=5):
     """Stop a generation process and every subprocess it may have spawned."""
     if proc is None or proc.poll() is not None:
@@ -1415,6 +1506,8 @@ def model_update_fingerprint(component):
         repositories = [ROOT / "h3.c"]
         paths = [Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json",
                  Path(H3_MODEL) / "Ref2VA" / "transformer" / "config.json"]
+    elif component == "h3mlx":
+        repositories = [H3MLX_ROOT]
     identity = []
     for repository in repositories:
         try:
@@ -1436,8 +1529,17 @@ def model_update_fingerprint(component):
 def install_model_component(component, update=False):
     """Run an immutable snapshot of the idempotent installer in the background."""
     model_installs[component] = {"status": "running", "message": "Preparing download…"}
+    if component == "qwen-image":
+        try:
+            qwen_image.install(lambda message: model_installs.update({component: {"status": "running", "message": message}}))
+            model_installs[component] = {"status": "ready", "message": "Qwen image installed"}
+        except Exception as exc:
+            model_installs[component] = {"status": "error", "message": str(exc)}
+        return
     if component == "h3":
         flags = ["--no-formatter"]
+    elif component == "h3mlx":
+        flags = ["--no-models", "--no-h3", "--no-formatter", "--with-h3mlx"]
     elif component == "yue":
         flags = ["--no-models", "--no-h3", "--no-formatter", "--with-yue"]
     elif component == "formatter":
@@ -2194,6 +2296,7 @@ def create_storyboard_batch(project, payload):
         if continuity_mode == "none":
             source_media_id = None
         params = clamp_generation_params({**shared_params, **dict(card.get("params") or {})})
+        prompt, timing_repaired = retime_cut_timeline(prompt, params["frames"])
         proposed = {"character_ids": char_ids,
                     "character_reference_ids": character_reference_ids if "character_reference_ids" in card else None,
                     "reference_media_ids": reference_media_ids,
@@ -2235,6 +2338,8 @@ def create_storyboard_batch(project, payload):
                  "storyboard_id": str(payload.get("id") or ""), "storyboard_index": index,
                  "status": "queued", "error": None, "media": None, "mediaId": None,
                  "clipId": None, "first_frame": None, "last_frame": None}
+        if timing_repaired:
+            scene["warning"] = f"CUT timing was fitted automatically to {params['frames'] / FPS:.2f} seconds."
         project.setdefault("scenes", []).append(scene)
         project.setdefault("order", []).append(sid)
         pending = {"id": uuid.uuid4().hex[:10], "asset_uid": uuid.uuid4().hex[:16], "src": "",
@@ -2553,6 +2658,12 @@ def clamp_generation_params(params, generation_type="video"):
     if generation_type == "music":
         return clamp_music_params(params)
     out = dict(params)
+    if generation_type == "image" and out.get("image_model") == "qwen-image":
+        for axis in ("width", "height"):
+            out[axis] = max(256, min(2048, int(out.get(axis, 1024)) // 32 * 32))
+        out["steps"] = 8
+        out["frames"] = 1
+        return out
     out["frames"] = 5 if generation_type == "image" else max(8, min(MAX_FRAMES, int(out.get("frames", 56))))
     # h3.c rejects fewer than two denoising steps, so clamp at the API
     # boundary instead of letting a queued job fail after process startup.
@@ -2606,6 +2717,45 @@ def validate_generation_prompt(prompt, frames, actual_reference_count, continuat
     if exact_text and no_text and not text_whitelist:
         raise ValueError("The prompt both requests exact typography and forbids visible text. Remove the conflicting no-text instruction.")
     return True
+
+
+def retime_cut_timeline(prompt, frames):
+    """Scale a valid authored CUT plan to the selected frame duration.
+
+    The duration control is execution authority. Refinement may have authored
+    CUT ranges before the artist changes that control; proportional retiming is
+    deterministic and should not turn a recoverable mismatch into a failed job.
+    """
+    text = str(prompt or "")
+    matches = list(re.finditer(
+        r"(?i)\bCUT\s+(\d{1,2})\s*\|\s*(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)s?\b", text))
+    if not matches:
+        return text, False
+    target = max(8, min(MAX_FRAMES, int(frames or 56))) / FPS
+    source_end = float(matches[-1].group(3))
+    if source_end <= 0 or abs(source_end - target) <= .01:
+        return text, False
+    # Only repair an otherwise coherent timeline. Gaps, overlaps, reversed
+    # ranges, or non-sequential labels still need an authored correction.
+    prior_end = 0.0
+    for index, match in enumerate(matches, 1):
+        start, end = float(match.group(2)), float(match.group(3))
+        if int(match.group(1)) != index or end <= start or abs(start - prior_end) > .06:
+            return text, False
+        prior_end = end
+    scale = target / source_end
+    parts, cursor = [], 0
+    for match in matches:
+        parts.append(text[cursor:match.start()])
+        start, end = float(match.group(2)) * scale, float(match.group(3)) * scale
+        parts.append(f"CUT {int(match.group(1)):02d} | {start:.2f}-{end:.2f}s")
+        cursor = match.end()
+    parts.append(text[cursor:])
+    repaired = "".join(parts)
+    repaired = re.sub(
+        r"(?i)\b(create\s+(?:a\s+)?)\d+(?:\.\d+)?\s*(-?\s*second\s+video\b)",
+        lambda m: f"{m.group(1)}{target:.2f}-{m.group(2).lstrip('- ').strip()}", repaired, count=1)
+    return repaired, True
 
 
 def sniff_kind(data: bytes, ext: str):
@@ -3127,6 +3277,11 @@ def improve_idea_locally(idea, answers, project_style=""):
             exact = f"CUT {i+1:02d} | {seconds*i/cuts:.2f}-{seconds*(i+1)/cuts:.2f}s -"
             text = re.sub(rf"CUT\s+0?{i+1}(?:\s*\|\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?s?)?\s*[:\-]?", exact, text,
                           count=1, flags=re.IGNORECASE)
+            # Some small models echo the requested range twice (for example
+            # "CUT 01 | 0.00-1.17s -0.00-1.17s:"). Remove that second label
+            # while preserving the authored action that follows it.
+            text = re.sub(re.escape(exact) + r"\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?s?\s*:\s*",
+                          exact + " ", text, count=1, flags=re.IGNORECASE)
         forbidden = ("Loading model", "available commands", "Rewrite the user's", "build :", "model :", "llama", "subject_definitions:", "retention_analysis:",
                      "intermediate beat", "clear payoff", "establish the location", "choose an appropriate setting", "**INT.", "**EXT.")
         has_exact_cuts = all(f"CUT {i+1:02d} | {seconds*i/cuts:.2f}-{seconds*(i+1)/cuts:.2f}s" in text for i in range(cuts))
@@ -4438,9 +4593,24 @@ def monitor_h3_process(proc, scene_id, stall_timeout=H3_STALL_TIMEOUT,
     messages = stream_queue.Queue()
 
     def read_stderr():
+        pending = []
         try:
-            for raw in proc.stderr:
-                messages.put(raw)
+            # Native H3 redraws one terminal line with carriage returns. A
+            # pipe's readline iterator may buffer those until a later newline,
+            # hiding every loading/denoising callback from the browser. Read
+            # incrementally and treat either CR or LF as a complete update.
+            while True:
+                char = proc.stderr.read(1)
+                if not char:
+                    if pending:
+                        messages.put("".join(pending))
+                    break
+                if char in "\r\n":
+                    if pending:
+                        messages.put("".join(pending))
+                        pending.clear()
+                else:
+                    pending.append(char)
         finally:
             messages.put(None)
 
@@ -4743,6 +4913,54 @@ def run_music_job(scene_id, project):
             pump_queue(load_project_slug(project["slug"]))
 
 
+def run_qwen_image_job(scene_id, project):
+    global scene_proc, active_job
+    scene = next(s for s in project["scenes"] if s["id"] == scene_id)
+    pdir = proj_dir(project["slug"])
+    output = pdir / "media" / f"gen-{scene_id}.png"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    request_file = output.with_suffix(".request.json")
+    try:
+        refs = scene_all_references(scene, project)
+        paths = [str(p) for ref in refs for p in ref.get("paths", [])]
+        request_file.write_text(json.dumps({"prompt": ((scene.get("style_profile") or {}).get("prompt", "") + "\n" + scene["prompt"]).strip(), "references": paths,
+            "width": scene["params"]["width"], "height": scene["params"]["height"],
+            "seed": scene["params"].get("seed", 42), "output": str(output)}))
+        with output.with_suffix(".log").open("w") as log:
+            scene_proc = subprocess.Popen([str(qwen_image.PYTHON), str(ROOT / "qwen_image.py"), str(request_file)],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            code = scene_proc.wait()
+        if code or not output.is_file():
+            detail = output.with_suffix(".log").read_text()[-1800:]
+            raise RuntimeError("Qwen image failed: " + detail)
+        with lock:
+            latest = load_project_slug(project["slug"])
+            stored = next(s for s in latest["scenes"] if s["id"] == scene_id)
+            media = next((m for m in latest["media"] if m.get("scene_id") == scene_id), None)
+            if media is None:
+                media = add_media(latest, output, stored["name"], "image", "generated")
+                media["scene_id"] = scene_id
+            media.update({"src": str(output.relative_to(pdir)), "kind": "image", "status": "ready",
+                "duration": 0, "hasAudio": False, "w": stored["params"]["width"], "h": stored["params"]["height"],
+                "thumb": f"/media/gen-{scene_id}.png"})
+            media["generation"] = {"model": qwen_image.MODEL_ID, "prompt": stored["prompt"], "type": "image", "params": stored["params"]}
+            stored.update({"status": "ready", "error": None, "mediaId": media["id"], "media": media_url(media)})
+            save_project(latest)
+    except Exception as exc:
+        with lock:
+            latest = load_project_slug(project["slug"])
+            for item in latest["scenes"] + latest["media"]:
+                if item.get("id") == scene_id or item.get("scene_id") == scene_id:
+                    item.update({"status": "error", "error": str(exc)})
+            save_project(latest)
+    finally:
+        request_file.unlink(missing_ok=True)
+        scene_proc = None
+        active_job = None
+        progress.pop(scene_id, None)
+        pump_queue(load_project_slug(project["slug"]))
+
+
 def run_job(scene_id, project):
     global active_job, scene_proc
     # HTTP requests each load their own project snapshot. A later enqueue may
@@ -4758,6 +4976,8 @@ def run_job(scene_id, project):
         scene["error"] = None
         scene["params"] = clamp_generation_params(
             scene.get("params") or {}, scene.get("generation_type", "video"))
+        if scene.get("generation_type", "video") == "video" and using_h3mlx():
+            scene["params"] = h3mlx_generation_params(scene["params"])
         pending = next((x for x in project.get("media", []) if x.get("scene_id") == scene_id), None)
         if pending:
             pending["status"] = "running"
@@ -4768,6 +4988,8 @@ def run_job(scene_id, project):
 
     if music_scene:
         return run_music_job(scene_id, project)
+    if scene.get("generation_type") == "image" and scene.get("image_model") == "qwen-image":
+        return run_qwen_image_job(scene_id, project)
 
     pdir = proj_dir(project["slug"])
     pdir.mkdir(parents=True, exist_ok=True)
@@ -4806,6 +5028,7 @@ def run_job(scene_id, project):
                   mode="ref2va" if generation_refs else ("i2va" if chain_frame else "t2va"),
                   characters=generation_refs, answers=scene.get("guide_answers") or {}))
               if is_image else build_prompt(scene, project, ref2va, chain_frame, generation_refs))
+    prompt, timing_repaired = retime_cut_timeline(prompt, scene.get("params", {}).get("frames", 56))
     validate_generation_prompt(prompt, scene.get("params", {}).get("frames", 56),
                                1 if chain_frame else visual_reference_count(generation_refs), continuation=bool(chain_frame))
     # Persist exactly what was sent, independently from the editable source
@@ -4814,6 +5037,9 @@ def run_job(scene_id, project):
         latest = load_project_slug(project["slug"])
         stored = next((item for item in latest.get("scenes", []) if item.get("id") == scene_id), None)
         if stored is not None:
+            if timing_repaired:
+                stored["prompt"] = prompt
+                stored["warning"] = f"CUT timing was fitted automatically to {stored.get('params', {}).get('frames', 56) / FPS:.2f} seconds."
             stored["execution_prompt"] = prompt
             stored["formatter_model"] = FORMATTER_MODEL_ID or (Path(FORMATTER_MODEL).name if formatter_available() else "deterministic")
             if stored.get("prompt_skill_id"):
@@ -4845,15 +5071,18 @@ def run_job(scene_id, project):
         # tokens. They make 10-15s native renders practical without changing
         # requested dimensions, frame count, denoising steps, or seed.
         cmd += ["--core-reuse", "6", "--token-reduction"]
+    elif using_h3mlx():
+        # Documented H3MLX fast path for the stock model. This reduces unified
+        # memory traffic without changing the requested frames or geometry.
+        cmd += ["--use-int8-row-fc2"]
 
-    progress[scene_id] = {"phase": "starting", "completed": 0, "total": 1,
+    progress[scene_id] = {"phase": "loading model and references", "completed": 0, "total": 1,
                           "started_at": time.time(), "first_step_at": None}
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, cwd=str(Path(H3_BIN).parent),
+                                text=True, bufsize=1, cwd=str(Path(H3_BIN).parent),
                                 start_new_session=(os.name != "nt"))
         scene_proc = proc
-        pat = re.compile(r"([A-Za-z_ ]+?)\s+(\d+)/(\d+)")
         tail = []
         long_native = bool(scene.get("params", {}).get("stability_adjusted"))
         for line in monitor_h3_process(
@@ -4861,19 +5090,18 @@ def run_job(scene_id, project):
                 stall_timeout=10800 if long_native else H3_STALL_TIMEOUT,
                 hard_timeout=H3_HARD_TIMEOUT):
             line = line.rstrip("\n")
-            m = pat.search(line)
-            if m:
+            parsed = parse_h3_progress_line(line)
+            if parsed:
                 previous = progress.get(scene_id, {})
-                progress[scene_id] = {"phase": m.group(1).strip(),
-                                      "completed": int(m.group(2)), "total": int(m.group(3)),
+                progress[scene_id] = {**parsed,
                                       "started_at": previous.get("started_at", time.time()),
                                       "first_step_at": previous.get("first_step_at") or time.time()}
             else:
                 tail.append(line); del tail[:-30]
         rc = proc.wait()
         if rc != 0:
-            raise RuntimeError(f"h3 exited with code {rc}: " +
-                               " | ".join(t for t in tail if t.strip())[-800:])
+            detail = " | ".join(clean_h3_output(t) for t in tail if clean_h3_output(t))[-800:]
+            raise RuntimeError(f"h3 exited with code {rc}: {detail}")
         if is_image:
             frames = sorted(frames_dir.glob("frame-*.ppm"))
             if not frames:
@@ -5575,6 +5803,7 @@ class Handler(BaseHTTPRequestHandler):
                 out["engine"] = {
                     "app_version": APP_IDENTITY["version"], "app_build": APP_IDENTITY["build"],
                     "h3_bin": H3_BIN, "h3_bin_ok": Path(H3_BIN).exists(),
+                    "h3_backend": "h3mlx" if using_h3mlx() else "h3-metal",
                     "model_root": H3_MODEL,
                     "fl2va": (Path(H3_MODEL) / "FL2VA" / "transformer" / "config.json").exists(),
                     "ref2va": ref2va_available(),
@@ -5588,6 +5817,7 @@ class Handler(BaseHTTPRequestHandler):
                     "model_installs": dict(model_installs),
                     "can_undo": bool(undo_stacks.get(proj.get("slug"), [])),
                     "music": yue_music_state(),
+                    "qwen_image": qwen_image.state(),
                 }
                 return self._json(out)
         if p == "/api/prompt/templates":
@@ -5686,10 +5916,12 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/models/install":
             b = self._body()
             component = str(b.get("component") or "")
-            if component not in ("h3", "formatter", "runtime", "yue"):
+            if component not in ("h3", "h3mlx", "formatter", "runtime", "yue", "qwen-image"):
                 return self._json({"error": "unknown model component"}, 400)
-            if component == "h3" and not b.get("accepted_license"):
+            if component in ("h3", "h3mlx") and not b.get("accepted_license"):
                 return self._json({"error": "Accept the MiniMax H3 license before downloading."}, 400)
+            if component == "qwen-image" and not b.get("accepted_license"):
+                return self._json({"error": "Accept the Qwen Research License before downloading."}, 400)
             with model_install_lock:
                 if model_installs.get(component, {}).get("status") == "running":
                     return self._json({"ok": True, "status": "running"})
@@ -6179,6 +6411,16 @@ class Handler(BaseHTTPRequestHandler):
             requested_type = str(b.get("generation_type") or "video")
             generation_type = ("music" if requested_type == "music"
                                else "image" if requested_type == "image" else "video")
+            image_model = str(b.get("image_model") or "h3")
+            if generation_type == "image" and image_model not in ("h3", "qwen-image"):
+                return self._json({"error": "Unknown image model"}, 400)
+            if generation_type == "image" and image_model == "qwen-image":
+                if b.get("source_media_id") or b.get("chain"):
+                    return self._json({"error": "For Qwen image, add a still-image reference instead of video continuation."}, 400)
+                if not qwen_image.state()["ready"]:
+                    return self._json({"error": "Install Qwen-Image-2.1-Turbo in Settings first."}, 400)
+                if any(item.get("kind") in ("video_reference", "audio_reference") for item in selected_refs):
+                    return self._json({"error": "Qwen image accepts image references only."}, 400)
             if generation_type == "music" and (char_ids or reference_media_ids or b.get("source_media_id")):
                 # YuE 2 has no reference-audio or image argument; saying so here
                 # beats queueing a song that silently ignores the artist's work.
@@ -6188,17 +6430,22 @@ class Handler(BaseHTTPRequestHandler):
             if generation_type == "image" and any(item.get("kind") == "audio_reference" for item in selected_refs):
                 return self._json({"error": "Audio references are supported for H3 video generation only. Remove the audio reference or switch to Video."}, 400)
             use_project_style = b.get("use_project_style", proj.get("style_enabled", True)) is not False
-            params = clamp_generation_params({**default_params(proj["canvas"]), **b.get("params", {})}, generation_type)
+            params = clamp_generation_params({**default_params(proj["canvas"]), **b.get("params", {}), "image_model": image_model}, generation_type)
+            incoming_prompt = str(b.get("prompt") or "")
+            timing_repaired = False
+            if generation_type == "video":
+                incoming_prompt, timing_repaired = retime_cut_timeline(incoming_prompt, params["frames"])
             s = {"id": sid, "name": b.get("name") or (next_image_name(proj) if generation_type == "image"
                                                       else next_music_name(proj) if generation_type == "music"
                                                       else next_scene_name(proj)),
-                 "prompt": b.get("prompt", ""),
+                 "prompt": incoming_prompt,
                  "original_prompt": str(b.get("original_prompt") or b.get("prompt") or ""),
-                 "refined_prompt": str(b.get("refined_prompt") or b.get("prompt") or ""),
+                 "refined_prompt": incoming_prompt if timing_repaired else str(b.get("refined_prompt") or b.get("prompt") or ""),
                  "skill_compilation": dict(b.get("skill_compilation") or {}),
                  "character_ids": char_ids, "character_reference_ids": character_reference_ids, "reference_media_ids": reference_media_ids,
                  "params": params, "guide_answers": dict(b.get("guide_answers") or {}),
                  "template_id": b.get("template_id"), "generation_type": generation_type,
+                 "image_model": str(b.get("image_model") or "h3"),
                  "prompt_skill_id": b.get("prompt_skill_id"),
                  "skill_customization": str(b.get("skill_customization") or "")[:500],
                  "style_profile": dict(proj.get("style_profile") or {}) if use_project_style else {},
@@ -6207,6 +6454,8 @@ class Handler(BaseHTTPRequestHandler):
                  "source_frame": str(b.get("source_frame") or "last"), "status": "idle", "error": None,
                  "media": None, "mediaId": None, "clipId": None,
                  "first_frame": None, "last_frame": None}
+            if timing_repaired:
+                s["warning"] = f"CUT timing was fitted automatically to {params['frames'] / FPS:.2f} seconds."
             if generation_type == "music":
                 # Structural preview only, so the composer and the inspector can state
                 # what the song is made of before anything runs. YuE 2 has no length

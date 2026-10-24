@@ -40,6 +40,7 @@ class ModelManagementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(server, "MODEL_REGISTRY_FILE", Path(td) / "registry.json"), \
              mock.patch.object(server, "H3_MODEL", str(Path(td) / "missing-model")), \
+             mock.patch.object(server, "H3MLX_BIN", Path(td) / "missing-h3mlx"), \
              mock.patch.object(server, "FORMATTER_MODEL", str(Path(td) / "missing-formatter.gguf")), \
              mock.patch.object(server, "yue_local_runtime", return_value={
                  "installed": False, "present": False, "ready": False,
@@ -53,12 +54,45 @@ class ModelManagementTests(unittest.TestCase):
         self.assertTrue(next(item for item in state["catalog"] if item["recommended"])["installed"] is False)
 
     def test_only_integrated_backend_is_advertised_as_installable(self):
-        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal", "yue2"])
+        self.assertEqual([item["id"] for item in server.MODEL_BACKENDS], ["h3-metal", "h3mlx", "yue2"])
         # Every advertised backend states which medium it actually produces, and
         # nothing is offered as installable without an execution path behind it.
-        self.assertEqual([item.get("media") for item in server.MODEL_BACKENDS], ["video", "music"])
+        self.assertEqual([item.get("media") for item in server.MODEL_BACKENDS], ["video", "video", "music"])
         self.assertTrue(all(item.get("install_component") for item in server.MODEL_BACKENDS))
         self.assertEqual(server.MODEL_BACKENDS[0]["install_component"], "h3")
+        self.assertEqual(server.MODEL_BACKENDS[1]["install_component"], "h3mlx")
+
+    def test_h3mlx_selection_changes_engine_without_changing_weights(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); stable = root / "h3.c" / "h3"; stable.parent.mkdir(); stable.touch()
+            mlx = root / "addons" / "h3mlx" / "h3-lora-lab" / "h3"; mlx.parent.mkdir(parents=True); mlx.touch()
+            sources = root / "sources.json"; weights = root / "models" / "MiniMax-H3"
+            previous_model = server.H3_MODEL
+            with mock.patch.object(server, "H3MLX_BIN", mlx), mock.patch.object(server, "DEFAULTS", dict(server.DEFAULTS, h3_bin=str(stable))), \
+                 mock.patch.object(server, "MODEL_SOURCE_FILE", sources), mock.patch.object(server, "_saved_model_sources", {}):
+                result = server.select_model_source("h3_backend", model_id="h3mlx", role="video_generation")
+                self.assertTrue(result["ok"])
+                self.assertEqual(server.H3_BIN, str(mlx.resolve()))
+                self.assertEqual(server.H3_MODEL, previous_model)
+
+    def test_h3mlx_uninstall_removes_only_engine_and_falls_back_to_stable(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); mlx_root = root / "addons" / "h3mlx"; mlx_root.mkdir(parents=True)
+            mlx_bin = mlx_root / "h3-lora-lab" / "h3"; mlx_bin.parent.mkdir(); mlx_bin.touch()
+            weights = root / "models" / "MiniMax-H3"; weights.mkdir(parents=True)
+            stable = root / "h3.c" / "h3"; stable.parent.mkdir(parents=True); stable.touch()
+            registry = root / "registry.json"; sources = root / "sources.json"
+            registry.write_text(json.dumps({"installations":[{"id":"install-h3mlx-managed", "backend_id":"h3mlx",
+                "path":str(mlx_root), "managed":True, "receipt":[str(mlx_root)]}], "loras":[]}))
+            with mock.patch.object(server, "MODEL_REGISTRY_FILE", registry), mock.patch.object(server, "MODEL_SOURCE_FILE", sources), \
+                 mock.patch.object(server, "H3MLX_ROOT", mlx_root), mock.patch.object(server, "H3MLX_BIN", mlx_bin), \
+                 mock.patch.object(server, "DEFAULTS", dict(server.DEFAULTS, h3_bin=str(stable))), \
+                 mock.patch.object(server, "H3_BIN", str(mlx_bin)), mock.patch.object(server, "_saved_model_sources", {"h3_bin":str(mlx_bin)}):
+                result = server.uninstall_managed_model("install-h3mlx-managed")
+                self.assertEqual(server.H3_BIN, str(stable))
+            self.assertTrue(result["active_removed"])
+            self.assertFalse(mlx_root.exists())
+            self.assertTrue(weights.exists())
 
     def test_catalog_does_not_recommend_unintegrated_streaming_backend(self):
         with tempfile.TemporaryDirectory() as td, \

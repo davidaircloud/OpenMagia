@@ -22,7 +22,8 @@ class TimelineCompositionTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stderr="", stdout="0.000000,\n2.500000\n3.000000\n")
             return SimpleNamespace(returncode=0, stderr="", stdout='{"streams":[],"format":{"duration":"10"}}')
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nle, "run", side_effect=fake_run), \
+                mock.patch.object(nle.shutil, "which", return_value="ffprobe"):
             source = Path(tmp) / "screen-recording.mp4"
             source.touch()
             output = Path(tmp) / "frame.png"
@@ -698,6 +699,22 @@ class TimelineCompositionTests(unittest.TestCase):
         params = server.clamp_generation_params({"steps": 1})
         self.assertEqual(params["steps"], 2)
 
+    def test_h3mlx_schedule_avoids_full_fifty_pass_suggestion(self):
+        params = server.h3mlx_generation_params({"steps": 50, "layers": 50, "reuse": 3,
+                                                  "width": 768, "height": 768, "frames": 120})
+        self.assertEqual((params["steps"], params["layers"], params["reuse"]), (30, 35, 2))
+        self.assertEqual((params["width"], params["height"], params["frames"]), (768, 768, 120))
+
+    def test_h3mlx_carriage_return_progress_is_parsed(self):
+        parsed = server.parse_h3_progress_line("\rdenoise                   3/30  ")
+        self.assertEqual(parsed, {"phase": "denoise", "completed": 3, "total": 30})
+        colored = server.parse_h3_progress_line(
+            "\r\x1b[K  \x1b[1;33m⏳\x1b[0m \x1b[1mdenoise enqueue         \x1b[0m "
+            "[\x1b[1;34m===                 \x1b[0m] \x1b[1;33m 10%\x1b[0m (3/30)")
+        self.assertEqual(colored, {"phase": "denoise enqueue", "completed": 3, "total": 30})
+        self.assertEqual(server.clean_h3_output("\x1b[K\x1b[1;32m✓\x1b[0m video VAE"),
+                         "✓ video VAE")
+
     def test_long_native_video_honors_requested_high_schedule(self):
         params = server.clamp_generation_params({"width": 1344, "height": 768, "frames": 360,
                                                   "steps": 30, "layers": 50, "reuse": 1,
@@ -742,6 +759,23 @@ class TimelineCompositionTests(unittest.TestCase):
         self.assertTrue(server.validate_generation_prompt(
             'Text A = "VAMOS TARDE". No visible text other than the exact quoted phrase.',
             120, 0))
+
+    def test_cut_timeline_is_automatically_fitted_to_selected_frames(self):
+        prompt = ("Create a 2.33-second video with exactly two cuts. "
+                  "CUT 01 | 0.00-1.17s - Descend. "
+                  "CUT 02 | 1.17-2.33s - Land.")
+        repaired, changed = server.retime_cut_timeline(prompt, 140)
+        self.assertTrue(changed)
+        self.assertIn("Create a 5.83-second video", repaired)
+        self.assertIn("CUT 01 | 0.00-2.93s", repaired)
+        self.assertIn("CUT 02 | 2.93-5.83s", repaired)
+        self.assertTrue(server.validate_generation_prompt(repaired, 140, 0))
+
+    def test_cut_timeline_does_not_hide_authored_gaps(self):
+        prompt = "CUT 01 | 0.00-1.00s - A. CUT 02 | 1.50-2.00s - B."
+        repaired, changed = server.retime_cut_timeline(prompt, 120)
+        self.assertFalse(changed)
+        self.assertEqual(prompt, repaired)
 
     def test_local_refinement_does_not_replace_authored_cut_plan(self):
         authored = "CUT 01 | 0.00-2.50s - Setup.\nCUT 02 | 2.50-5.00s - Payoff."

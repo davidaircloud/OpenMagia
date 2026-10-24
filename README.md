@@ -92,6 +92,10 @@ Native generation currently targets:
 
 The editor launches on macOS, Linux, and Windows, but OpenMagia only advertises generation backends it can install and execute end to end. CUDA and lower-memory backends are welcome contributions; they will appear in Settings once they meet that bar.
 
+### H3MLX video engine (optional)
+
+Apple Silicon systems can install [H3MLX](https://github.com/robzombai/h3mlx) from **Settings → Models → Add-ons** or with `./install.sh --with-h3mlx`. OpenMagia builds it in the ignored `addons/h3mlx` directory, reuses the existing MiniMax H3 weights, applies its tested video-decoder compatibility fix automatically, and validates the repaired pipeline before completing installation. No manual source editing is required. H3MLX-specific generation presets, progress parsing, queue recovery, backend selection, updates, and complete removal are handled by OpenMagia.
+
 ### Music generation (optional)
 
 Songs come from [YuE 2](https://github.com/multimodal-art-projection/YuE) (m-a-p/YuE2-3B). Install it with `./install.sh --with-yue` or from **Settings → Music**.

@@ -43,6 +43,11 @@ class PromptComposerUiTests(unittest.TestCase):
         self.assertIn("if(!sharedStylePreservesSource(authored,prompt))", script)
         self.assertIn("OpenMagia kept your original shared style", script)
 
+    def test_scene_refine_keeps_style_out_of_editable_prompt(self):
+        script = (ROOT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("$('#genPrompt').value = result.out.expanded_idea", script)
+        self.assertNotIn("guideAnswers = result.answers; $('#genPrompt').value = result.out.prompt", script)
+
 
 if __name__ == "__main__":
     unittest.main()

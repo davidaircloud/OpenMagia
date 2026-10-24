@@ -22,7 +22,9 @@ WANT_REF2VA=1
 WANT_FORMATTER=1
 WANT_MODELS=1
 WANT_H3=1
+WANT_H3MLX=0
 UPDATE_SOURCES=0
+H3MLX_DIR="${H3MLX_DIR:-$SCRIPT_DIR/addons/h3mlx}"
 LLAMA_DIR="${LLAMA_DIR:-$SCRIPT_DIR/addons/llama.cpp}"
 FORMATTER_DIR="${FORMATTER_DIR:-$SCRIPT_DIR/addons/models/qwen2.5-7b}"
 FORMATTER_MODEL="$FORMATTER_DIR/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
@@ -53,6 +55,7 @@ OpenMagia installer
   --no-formatter  skip the ~4.7 GB local prompt formatter and llama.cpp runtime
   --no-models     skip MiniMax H3 checkpoint downloads
   --no-h3         skip downloading and building the H3 engine
+  --with-h3mlx    install the experimental H3MLX video engine (shares H3 weights)
   --update-sources  check configured upstream sources and download changed files
   --with-yue      install the YuE 2 music runtime (Apple Silicon MPS or NVIDIA;
                   ~8 GB of weights; --no-yue-weights skips the download)
@@ -70,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --no-formatter) WANT_FORMATTER=0; shift;;
     --no-models) WANT_MODELS=0; shift;;
     --no-h3) WANT_H3=0; shift;;
+    --with-h3mlx) WANT_H3MLX=1; shift;;
     --update-sources) UPDATE_SOURCES=1; shift;;
     --with-yue) WANT_YUE=1; shift;;
     --no-yue-weights) WANT_YUE_WEIGHTS=0; shift;;
@@ -197,6 +201,42 @@ else
   ( cd "$H3C_DIR" && make -j8 )
   [[ -x "$H3_BIN" ]] || { err "build did not produce $H3_BIN"; exit 1; }
   log "h3 engine built: $H3_BIN"
+fi
+
+# --- 1b. optional H3MLX engine ---------------------------------------------
+# H3MLX shares the MiniMax checkpoint with h3.c. Its entire managed footprint
+# stays below addons/h3mlx so Settings can remove it atomically and safely.
+if [[ "$WANT_H3MLX" -eq 1 ]]; then
+  have git || { err "git is required to install H3MLX"; exit 1; }
+  if [[ ! -d "$H3MLX_DIR/.git" ]]; then
+    log "downloading the experimental H3MLX engine ..."
+    git clone --depth 1 https://github.com/robzombai/h3mlx.git "$H3MLX_DIR"
+  elif [[ "$UPDATE_SOURCES" -eq 1 ]]; then
+    log "checking H3MLX for updates ..."
+    git -C "$H3MLX_DIR" pull --ff-only
+  fi
+  have make || { err "make is required to build H3MLX"; exit 1; }
+  # H3MLX currently ships the BF16 video-VAE QK/RoPE kernel in Metal source
+  # but omits it from the runtime pipeline registry. Denoising then completes
+  # before video decoding fails. Patch the managed source until upstream adds
+  # the missing registry entry.
+  H3MLX_GPU_SOURCE="$H3MLX_DIR/h3-lora-lab/h3_gpu.m"
+  if ! grep -Fq '@"h3_video_qkv_rope_f32", @"h3_video_qkv_rope_bf16"' "$H3MLX_GPU_SOURCE"; then
+    sed -i.bak 's/@"h3_video_qkv_rope_f32",/@"h3_video_qkv_rope_f32", @"h3_video_qkv_rope_bf16",/' "$H3MLX_GPU_SOURCE"
+    rm -f "$H3MLX_GPU_SOURCE.bak"
+  fi
+  if ! grep -Fq '@"h3_scale_add_f32", @"h3_scale_add_bf16", @"h3_bias_add_bf16"' "$H3MLX_GPU_SOURCE"; then
+    sed -i.bak 's/@"h3_scale_add_f32",/@"h3_scale_add_f32", @"h3_scale_add_bf16", @"h3_bias_add_bf16",/' "$H3MLX_GPU_SOURCE"
+    rm -f "$H3MLX_GPU_SOURCE.bak"
+  fi
+  python3 "$SCRIPT_DIR/scripts/validate_h3mlx_registry.py" "$H3MLX_GPU_SOURCE" || {
+    err "H3MLX has unregistered Metal pipelines required at runtime"
+    exit 1
+  }
+  log "building H3MLX ..."
+  ( cd "$H3MLX_DIR/h3-lora-lab" && make -j8 )
+  [[ -x "$H3MLX_DIR/h3-lora-lab/h3" ]] || { err "H3MLX build did not produce its h3 executable"; exit 1; }
+  log "H3MLX engine ready: $H3MLX_DIR/h3-lora-lab/h3"
 fi
 
 # --- 2. lightweight local prompt formatter ----------------------------------

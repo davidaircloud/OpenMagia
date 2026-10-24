@@ -113,6 +113,7 @@
       <div class="chead generateTypeHead"><h3>Generate</h3><label><span>Type</span><select id="genType" class="txt" aria-label="Generation type"><option value="video" selected>Video</option><option value="storyboard">Storyboard</option><option value="image">Image (Beta)</option><option value="music">Music</option></select></label></div>
       <div class="generateScroll">
       <div id="generationTypeNotice" class="generationTypeNotice" hidden></div>
+      <label id="imageModelRow" hidden>Image model<select id="imageModel" class="txt"><option value="h3">MiniMax H3 · still frame</option><option value="qwen-image">Qwen-Image-2.1-Turbo</option></select></label>
       <div id="videoGenerationControls">
       <section class="projectStyleCard" id="sharedStyleDetails">
         <button class="projectStyleTop" id="sharedStyleExpand" type="button" aria-expanded="false" aria-controls="sharedStyleBody"><span><span class="scopeLabel">SHARED STYLE</span><small>Applied to every scene</small></span><svg class="sharedStyleChevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
@@ -474,6 +475,6 @@
 <input type="file" id="charFile" accept="image/*" style="display:none">
 <input type="file" id="musicLoraFile" accept=".zip,application/zip" style="display:none">
 
-<script src="app.js?v=20260923-style-preservation-v2"></script>
+<script src="app.js?v=20261004-h3mlx-progress-v3"></script>
 </body>
 </html>

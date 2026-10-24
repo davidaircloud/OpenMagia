@@ -16,3 +16,5 @@ projects/
 h3.c/
 models/
 addons/
+
+/addons/qwen-image/

@@ -139,7 +139,11 @@ def format_prompt(*, idea, style, frames, mode="t2va", characters=(), answers=No
     camera = _clean(answers.get("camera"), "motivated camera movement with clear composition")
     pacing = _clean(answers.get("pacing"), "purposeful pacing")
     text = _clean(answers.get("text"), "No visible text unless explicitly requested")
-    sound = _clean(answers.get("sound"), "detailed environmental ambience and synchronized physical action sounds")
+    vacuum_exterior = (re.search(r"\b(?:moon|lunar)\s+(?:surface|exterior|regolith)\b|\bspacewalk\b", idea, re.I)
+                       and not re.search(r"\b(?:inside|interior|cabin|habitat|airlock)\b", idea, re.I))
+    default_sound = ("near-silence in the lunar vacuum; only suit breathing, radio communication, and contact vibration transmitted through the subject are audible"
+                     if vacuum_exterior else "detailed environmental ambience and synchronized physical action sounds")
+    sound = _clean(answers.get("sound"), default_sound)
     music = _clean(answers.get("music"), "a restrained score synchronized to the visual rhythm")
     end = f"{seconds:.2f}"
     timeline = _timeline(idea, style, setting, camera, pacing, text, seconds, answers.get("cuts"), answers.get("transitions"))
