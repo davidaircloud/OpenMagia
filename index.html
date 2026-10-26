@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261026-fastvideo-v2">
+<link rel="stylesheet" href="style.css?v=20261026-controls-v3">
 </head>
 <body>
 
@@ -395,7 +395,7 @@
     </header>
     <main class="storyboardBody">
       <section class="storyboardShared storyboardStyleSection">
-        <button id="storyboardStyleExpand" class="composerTool optionalStyleToggle" type="button" aria-expanded="false" aria-controls="storyboardStyleBody">Shared style <span aria-hidden="true">⌄</span></button>
+        <button id="storyboardStyleExpand" class="composerTool optionalStyleToggle" type="button" aria-expanded="false" aria-controls="storyboardStyleBody"><span>Shared style</span><svg class="sharedStyleChevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
         <div id="storyboardStyleBody" hidden><label class="optionalStyleEnabled"><input id="storyboardStyleEnabled" type="checkbox"> Apply to every scene</label>
         <textarea id="storyboardStyle" class="txt" placeholder="Describe the stable world, identity, materials, camera language, lighting, and details that must not change."></textarea></div>
       </section>
@@ -478,6 +478,6 @@
 <input type="file" id="charFile" accept="image/*" style="display:none">
 <input type="file" id="musicLoraFile" accept=".zip,application/zip" style="display:none">
 
-<script src="app.js?v=20261026-fastvideo-v2"></script>
+<script src="app.js?v=20261026-controls-v3"></script>
 </body>
 </html>

@@ -2591,7 +2591,7 @@ function renderStoryboardModelCapability(draft){
   const anchored=fastvideo&&draft.scenes.some((card,index)=>(card.source_media_id||(index>0&&card.continue_previous!==false))&&card.continuity_mode!=='reference');
   box.hidden=!(short||anchored);if(box.hidden){box.replaceChildren();return false;}
   const message=document.createElement('div');message.textContent=anchored?'FastVideo can’t use opening frames.':'FastVideo needs at least 5 seconds per scene.';box.replaceChildren(message);
-  const button=document.createElement('button');button.className='btn ghost';button.textContent='Switch to H3';box.appendChild(button);
+  const button=document.createElement('button');button.className='actionLink';button.textContent='Switch to H3';box.appendChild(button);
   button.onclick=async()=>{button.disabled=true;try{const management=await api('/api/models/manage'),replacement=(management.installations||[]).find(item=>item.available&&['h3-metal','h3mlx'].includes(item.backend_id));if(!replacement){message.textContent='Install H3 to use this option.';button.textContent='Open settings';button.onclick=()=>{closeStoryboard();setHubView('settings');};button.disabled=false;return;}await api('/api/models/select',{method:'POST',body:{kind:'h3_backend',model_id:replacement.backend_id,role:'video_generation'}});await refresh();renderStoryboard();}catch(error){message.textContent=error.message;button.disabled=false;}};
   return true;
 }
@@ -2673,8 +2673,8 @@ function renderModelCapability(){
   const message=fastVideoConflict();box.hidden=!message;
   if(!message){box.replaceChildren();return;}
   const text=document.createElement('div');text.textContent=message;box.replaceChildren(text);
-  if(!sourceSelection){const duration=document.createElement('button');duration.className='btn primary';duration.textContent='Use 5 seconds';duration.onclick=()=>{$('#genFrames').value=120;updateSecsHint();renderModelCapability();};box.appendChild(duration);}
-  const change=document.createElement('button');change.className='btn ghost';change.textContent='Switch to H3';
+  if(!sourceSelection){const duration=document.createElement('button');duration.className='actionLink';duration.textContent='Use 5 seconds';duration.onclick=()=>{$('#genFrames').value=120;updateSecsHint();renderModelCapability();};box.appendChild(duration);}
+  const change=document.createElement('button');change.className='actionLink';change.textContent='Switch to H3';
   change.onclick=async()=>{change.disabled=true;try{const management=await api('/api/models/manage');const replacement=(management.installations||[]).find(item=>item.available&&['h3-metal','h3mlx'].includes(item.backend_id));if(!replacement){text.textContent='Install H3 to use this option.';change.textContent='Open settings';change.onclick=()=>setHubView('settings');change.disabled=false;return;}await api('/api/models/select',{method:'POST',body:{kind:'h3_backend',model_id:replacement.backend_id,role:'video_generation'}});await refresh();applyGenerationType();renderModelCapability();}catch(error){text.textContent=error.message;change.disabled=false;}};
   box.appendChild(change);
 }
