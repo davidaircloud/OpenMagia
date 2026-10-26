@@ -8,13 +8,14 @@ ROOT = Path(__file__).parents[1]
 class PromptComposerUiTests(unittest.TestCase):
     def test_shared_style_is_collapsed_and_distinct_from_scene_prompt(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
-        self.assertIn('<section class="projectStyleCard" id="sharedStyleDetails">', html)
-        self.assertIn('SHARED STYLE', html)
+        self.assertIn('<section class="optionalStyle" id="sharedStyleDetails">', html)
+        self.assertIn('id="sharedStyleEnabled"', html)
+        self.assertLess(html.index('id="genPrompt"'), html.index('id="sharedStyleDetails"'))
         self.assertIn('<span>PROMPT</span>', html)
         self.assertNotIn('SCENE PROMPT', html)
         video_composer = html[html.index('id="videoGenerationControls"'):html.index('id="musicGenerationControls"')]
         self.assertNotIn('<span class="scopeLabel">DIRECTION</span>', video_composer)
-        self.assertIn('Applied to every scene', html)
+        self.assertIn('Apply to this project', html)
         self.assertNotIn('Refine shared style', html)
         self.assertNotIn('id="projectStyleToggle"', html)
         self.assertIn('id="sharedStyleBody" hidden', html)

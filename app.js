@@ -2047,6 +2047,7 @@ function bindInfoTooltips() {
 }
 function updateSecsHint() {
   const f = $('#genFrames'); const hint = $('#genSecsHint');
+  renderModelCapability();
   if (f && hint) { const v = parseFloat(f.value); const seconds = isFinite(v) ? (v / 24).toFixed(1) : '0'; hint.textContent = '≈ ' + seconds + 's'; if ($('#composerDuration')) $('#composerDuration').textContent = seconds + 's'; }
 }
 let selChars = new Set();
@@ -2135,8 +2136,8 @@ function closeComposerPicker() {
 function applyProjectStyle(t) {
   selectedTemplate = t;
   const profile = { name: t.name, prompt: t.style, skill_id: t.id, source: 'OpenMagia H3 style' };
-  api('/api/project', { method: 'POST', body: { style_profile: profile, style_enabled:true } }).then(() => {
-    state.style_profile = profile; state.style_enabled=true; renderGenerate(); closeComposerPicker(); toast('Project style applied', 'ok');
+  api('/api/project', { method: 'POST', body: { style_profile: profile, style_enabled:state.style_enabled!==false } }).then(() => {
+    state.style_profile = profile; renderGenerate(); closeComposerPicker(); toast('Project style applied', 'ok');
   }).catch(e => toast(e.message, 'err'));
 }
 function renderComposerPicker() {
@@ -2146,10 +2147,11 @@ function renderComposerPicker() {
   const q = ($('#composerPickerSearch').value || '').toLowerCase();
   if (composerPickerMode === 'models') {
     $('#composerPickerTitle').textContent = 'Models';
-    $('#composerPickerSubtitle').textContent = 'Choose the generator for this composer.'; $('#composerPickerSubtitle').style.display = '';
+    syncVideoModelCards();
+    $('#composerPickerSubtitle').style.display = 'none';
     for (const model of MODEL_CATALOG.filter(m => (m.name + ' ' + m.type + ' ' + m.detail).toLowerCase().includes(q))) {
       const b = document.createElement('button'); b.className = 'pickerRow' + (selectedModel === model.id ? ' on' : ''); b.disabled = !model.available;
-      b.innerHTML = '<span class="pickerIcon">' + (model.type === 'Video' ? '▶' : '♫') + '</span><span><strong>' + esc(model.name) + '</strong><small>' + esc(model.type + ' · ' + model.detail) + '</small></span><em>' + (selectedModel === model.id ? 'Selected' : (model.available ? 'Select' : 'Soon')) + '</em>';
+      b.innerHTML = '<span class="pickerIcon">' + (model.type === 'Video' ? '▶' : '♫') + '</span><span><strong>' + esc(model.name) + '</strong><small>' + esc(model.type + ' · ' + model.detail) + '</small></span><em>' + (selectedModel === model.id ? 'Selected' : (model.available ? 'Select' : 'Install in settings')) + '</em>';
       b.addEventListener('click', () => { selectedPickerItem = model; renderPickerDetail(); }); wrap.appendChild(b);
     }
     return;
@@ -2239,14 +2241,15 @@ function renderPickerDetail() {
     $('#pickerApply').addEventListener('click',()=>{if(selRefs.has(item.id))selRefs.delete(item.id);else{const next=[...selRefs,item.id],error=referenceSelectionError(next);if(error&&!error.startsWith('Add at least one image')){toast(error,'err');return;}selRefs.add(item.id);}normalizeCharacterReferenceSelection();renderGenerate();closeComposerPicker();});
     $('#composerPicker').classList.add('detail-open');return;
   }
-  const body = castMode ? 'Include this character’s ordered identity references in the next generation.' : sourceMode ? (item.kind === 'image' ? 'This still image will become the opening visual reference for the generated scene.' : 'Choose whether the first or last frame of this media should become the opening visual reference.') : modelMode ? (item.id === 'h3' ? 'Creates synchronized video and audio locally through h3.c. Accepts 4–15 seconds at 24fps, up to nine ordered images, and up to three audio references totaling 15 seconds.' : 'Composes a finished song from a style description and lyrics. It takes no length, tempo, key, reference audio, or negative prompt - YuE 2 has no such argument, so OpenMagia offers none.')
+  const body = castMode ? 'Include this character’s ordered identity references in the next generation.' : sourceMode ? (item.kind === 'image' ? 'This still image will become the opening visual reference for the generated scene.' : 'Choose whether the first or last frame of this media should become the opening visual reference.') : modelMode ? (item.type === 'Video' ? item.detail : 'Composes a finished song from a style description and lyrics. It takes no length, tempo, key, reference audio, or negative prompt - YuE 2 has no such argument, so OpenMagia offers none.')
     : styleMode ? item.style : promptSkillInstruction(item);
   const steps = item.steps || (item.defaults ? Object.entries(item.defaults).map(([k,v]) => k + ': ' + v) : []);
   const sourceGenerating = sourceMode && ['queued','running'].includes(item.status);
   const sourcePreview = sourceMode ? '<div class="sourceDetailPreview">' + (sourceGenerating ? '<span class="generationPending"><span></span><b>Generating media</b><small>The last frame will be used when it is ready</small></span>' : item.kind === 'image' ? '<img src="' + esc(mediaUrl(item)) + '" alt="">' : '<video src="' + esc(mediaUrl(item)) + '" muted controls preload="metadata"' + (item.thumb ? ' poster="' + esc(mediaPathUrl(item.thumb)) + '"' : '') + '></video>') + '</div>' : '';
   box.innerHTML = sourcePreview + '<span class="scopeLabel">' + (castMode ? 'SCENE CAST' : sourceMode ? 'OPENING REFERENCE' : modelMode ? 'MODEL DETAILS' : styleMode ? 'PERSISTENT PROJECT STYLE' : 'SCENE PROMPT SKILL') + '</span><h3>' + esc(title) + '</h3><p>' + esc(sourceGenerating ? 'Continue directly from this generation. OpenMagia will take its last frame when ready and locally refine the next prompt for visual continuity.' : summary) + '</p><div class="pickerPreview">' + esc(body) + '</div>' + (sourceMode && item.kind !== 'image' && !sourceGenerating ? '<div class="frameChoice"><button data-frame="first">First frame</button><button class="on" data-frame="last">Last frame</button></div>' : '') + (steps.length ? '<ul>' + steps.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '') + '<div class="pickerDetailActions"><button class="btn primary" id="pickerApply"' + (modelMode && !item.available ? ' disabled' : '') + '>' + (castMode ? (selChars.has(item.id) ? 'Remove from scene' : 'Add to scene') : sourceMode ? (sourceGenerating ? 'Continue from this generating media' : 'Use as opening frame') : modelMode ? (item.available ? 'Use this model' : 'Coming soon') : styleMode ? 'Apply as project style' : 'Add to scene prompt') + '</button></div>';
+  if(modelMode)box.innerHTML='<h3>'+esc(item.name)+'</h3><p>'+esc(item.detail)+'</p><div class="pickerDetailActions"><button class="btn primary" id="pickerApply"'+(!item.available?' disabled':'')+'>'+(item.type==='Video'?'Use for video':'Use for music')+'</button></div>';
   $$('.frameChoice button', box).forEach(b => b.addEventListener('click', () => { pendingSourceFrame = b.dataset.frame; $$('.frameChoice button', box).forEach(x => x.classList.toggle('on', x === b)); }));
-  $('#pickerApply').addEventListener('click', () => {
+  $('#pickerApply').addEventListener('click', async() => {
     if (castMode) {
       if (selChars.has(item.id)) selChars.delete(item.id);
       else {
@@ -2256,7 +2259,7 @@ function renderPickerDetail() {
       renderGenerate(); closeComposerPicker();
     }
     else if (sourceMode) { sourceSelection = { mediaId:item.id, frame:pendingSourceFrame, name:item.name }; renderSourceContext(); closeComposerPicker(); }
-    else if (modelMode) { selectedModel = item.id; $('#modelPickerBtn').textContent = '▣ Models · H3'; closeComposerPicker(); }
+    else if (modelMode) { try{if(item.backend)await api('/api/models/select',{method:'POST',body:{kind:'h3_backend',model_id:item.backend,role:'video_generation'}});else if(item.id==='music')$('#genType').value='music';await refresh();applyGenerationType();closeComposerPicker();}catch(error){toast(error.message,'err');} }
     else if (styleMode) applyProjectStyle(item);
     else if(composerPickerMode==='music-skills'){if(musicSkillId!==item.id)musicSkillCustomization='';musicSkillId=item.id;renderMusicSkills();compileMusicPreview(true);closeComposerPicker();$('#musicPrompt').focus();}
     else { activePromptSkill = item; renderActivePromptSkill(); closeComposerPicker(); $('#genPrompt').focus(); }
@@ -2449,7 +2452,11 @@ function captureStoryboardFields(){
 function scheduleStoryboardSave(){captureStoryboardFields();clearTimeout(storyboardSaveTimer);const slug=storyboardProjectSlug,draft=JSON.parse(JSON.stringify(storyboardDraft));if(!slug||!draft)return;storyboardSaveTimer=setTimeout(()=>api('/api/projects/'+encodeURIComponent(slug)+'/storyboard',{method:'POST',body:{project_slug:slug,storyboard_draft:draft}}).catch(()=>{}),300);}
 function renderStoryboard(){
   const draft=ensureStoryboardDraft(),style=draft.style_profile||{};
-  draft.use_project_style=true;$('#storyboardStyle').value=style.prompt||'';
+  const fastvideo=engine&&engine.h3_backend==='fastvideo';
+  ['storyboardQuality','storyboardSteps'].forEach(id=>{$('#'+id).closest('label').hidden=fastvideo;});
+  if(fastvideo)draft.output.steps=8;
+  renderStoryboardModelCapability(draft);
+  $('#storyboardStyle').value=style.prompt||'';$('#storyboardStyleEnabled').checked=draft.use_project_style!==false;
   draft.optimize_scenes=false;const out=draft.output||{};$('#storyboardAspect').value=out.aspect||canvasAspect(state.canvas);$('#storyboardResolution').value=out.resolution||'native';$('#storyboardQuality').value=out.quality||'high';$('#storyboardSteps').value=out.steps||30;$('#storyboardSeed').value=out.seed??42;$('#storyboardAudioMode').value=out.audio_mode||'effects';$('#storyboardAudioNotes').value=out.audio_notes||'';
   const wrap=$('#storyboardScenes');wrap.innerHTML='';
   draft.scenes.forEach((card,index)=>{
@@ -2466,7 +2473,7 @@ function renderStoryboard(){
   });updateStoryboardSummary();
 }
 function updateStoryboardSummary(){if(!storyboardDraft)return;const label=$('#storyboardGenerate span');if(label)label.textContent='Generate '+storyboardDraft.scenes.length+' scene'+(storyboardDraft.scenes.length===1?'':'s');}
-function openStoryboard(){ensureStoryboardDraft();renderStoryboard();$('#storyboardWorkspace').classList.add('on');$('#storyboardWorkspace').setAttribute('aria-hidden','false');document.body.classList.add('storyboardOpen');$('.storyboardBody').scrollTop=0;$('#storyboardClose').focus({preventScroll:true});}
+function openStoryboard(){ensureStoryboardDraft();renderStoryboard();renderStoryboardModelCapability(ensureStoryboardDraft());$('#storyboardWorkspace').classList.add('on');$('#storyboardWorkspace').setAttribute('aria-hidden','false');document.body.classList.add('storyboardOpen');$('.storyboardBody').scrollTop=0;$('#storyboardClose').focus({preventScroll:true});}
 function closeStoryboard(){scheduleStoryboardSave();$('#storyboardWorkspace').classList.remove('on');$('#storyboardWorkspace').setAttribute('aria-hidden','true');document.body.classList.remove('storyboardOpen');}
 function renderMagiaContext(){if(!magiaCard)return;const wrap=$('#magiaContext'),skill=storyboardPromptSkill(magiaCard),parts=[];for(const id of magiaCard.character_ids||[]){const character=state.characters.find(item=>item.id===id);if(character)parts.push('<span>'+esc(character.name)+'</span>');}for(const id of magiaCard.reference_media_ids||[]){const media=mediaById(id);if(media)parts.push('<span>'+esc(media.name)+'</span>');}if(skill)parts.push('<span>✦ '+esc(skill.name)+'</span>');wrap.innerHTML=parts.join('')||'<small>No context added</small>';updateMagiaPlan();}
 function updateMagiaPlan(){const seconds=Math.max(1,parseFloat($('#magiaDuration')&&$('#magiaDuration').value)||30),block=$('#magiaOptimize')&&$('#magiaOptimize').checked?5:15,count=Math.ceil(seconds/block),plan=$('#magiaPlan');if(plan)plan.textContent=count<2?'Increase duration to create at least 2 scenes':count>24?'Maximum 24 scenes':count+' scenes · '+block+' seconds each'+(seconds%block?' · shorter final scene':'')+' · up to 24';}
@@ -2577,12 +2584,23 @@ async function confirmContinuityReview(){
     button.textContent='Apply enabled changes';
   }catch(error){toast(error.message,'err');button.textContent='Preview selected fixes';}finally{button.disabled=false;}
 }
+function renderStoryboardModelCapability(draft){
+  const box=$('#storyboardModelCapability');if(!box)return false;
+  const fastvideo=engine&&engine.h3_backend==='fastvideo';
+  const short=fastvideo&&draft.scenes.some(card=>+(card.params||{}).frames<120||(!(card.params||{}).frames&&+(draft.output||{}).frames<120));
+  const anchored=fastvideo&&draft.scenes.some((card,index)=>(card.source_media_id||(index>0&&card.continue_previous!==false))&&card.continuity_mode!=='reference');
+  box.hidden=!(short||anchored);if(box.hidden){box.replaceChildren();return false;}
+  const message=document.createElement('div');message.textContent=anchored?'FastVideo can’t use opening frames.':'FastVideo needs at least 5 seconds per scene.';box.replaceChildren(message);
+  const button=document.createElement('button');button.className='btn ghost';button.textContent='Switch to H3';box.appendChild(button);
+  button.onclick=async()=>{button.disabled=true;try{const management=await api('/api/models/manage'),replacement=(management.installations||[]).find(item=>item.available&&['h3-metal','h3mlx'].includes(item.backend_id));if(!replacement){message.textContent='Install H3 to use this option.';button.textContent='Open settings';button.onclick=()=>{closeStoryboard();setHubView('settings');};button.disabled=false;return;}await api('/api/models/select',{method:'POST',body:{kind:'h3_backend',model_id:replacement.backend_id,role:'video_generation'}});await refresh();renderStoryboard();}catch(error){message.textContent=error.message;button.disabled=false;}};
+  return true;
+}
 async function generateStoryboard(){
-  if(storyboardSubmitting||continuityAuditPending)return;captureStoryboardFields();const draft=ensureStoryboardDraft(),empty=draft.scenes.findIndex(s=>!String(s.prompt||'').trim());if(empty>=0){toast('Scene '+(empty+1)+' needs a prompt','err');return;}const fingerprint=continuityReviewFingerprint(draft);if(!draft.continuity_review||draft.continuity_review.fingerprint!==fingerprint){await requestContinuityReview(draft);return;}const out=draft.output||{},aspect=out.aspect||'1:1',native=out.resolution==='native',landscape=aspect==='16:9',portrait=aspect==='9:16',dims=native?(landscape?[1344,768]:portrait?[768,1344]:[768,768]):(landscape?[896,512]:portrait?[512,896]:[512,512]),h3mlx=engine&&engine.h3_backend==='h3mlx',quality=h3mlx?{layers:35,reuse:out.quality==='balanced'?2:1}:({balanced:{layers:45,reuse:2},high:{layers:50,reuse:1},reference:{layers:50,reuse:1}}[out.quality]||{layers:45,reuse:2});
+  if(storyboardSubmitting||continuityAuditPending)return;captureStoryboardFields();const draft=ensureStoryboardDraft();if(renderStoryboardModelCapability(draft)){$('#storyboardModelCapability').scrollIntoView({block:'nearest'});return;}const empty=draft.scenes.findIndex(s=>!String(s.prompt||'').trim());if(empty>=0){toast('Scene '+(empty+1)+' needs a prompt','err');return;}const fingerprint=continuityReviewFingerprint(draft);if(!draft.continuity_review||draft.continuity_review.fingerprint!==fingerprint){await requestContinuityReview(draft);return;}const out=draft.output||{},aspect=out.aspect||'1:1',native=out.resolution==='native',landscape=aspect==='16:9',portrait=aspect==='9:16',dims=native?(landscape?[1344,768]:portrait?[768,1344]:[768,768]):(landscape?[896,512]:portrait?[512,896]:[512,512]),h3mlx=engine&&engine.h3_backend==='h3mlx',quality=h3mlx?{layers:35,reuse:out.quality==='balanced'?2:1}:({balanced:{layers:45,reuse:2},high:{layers:50,reuse:1},reference:{layers:50,reuse:1}}[out.quality]||{layers:45,reuse:2});
   if(native&&(+out.frames||56)>=240&&(out.quality==='high'||out.quality==='reference'))toast('Attempting the selected full '+(out.quality==='reference'?'Reference':'High')+' schedule. Long native renders may take substantially longer; OpenMagia will use one clearly reported stable retry only if the process stalls.','ok');
   storyboardSubmitting=true;$('#storyboardWorkspace').classList.add('storyboardSubmitting');const button=$('#storyboardGenerate');button.querySelector('span').textContent='Queuing storyboard…';
   try{for(let index=0;index<draft.scenes.length;index++){const card=draft.scenes[index],cardFrames=clamp(+(card.params||{}).frames||+out.frames||56,8,360),context=storyboardFormatContext(card,index),structured=isStructuredH3Prompt(card.prompt),migrateContinuation=context.continuation&&structured,skill=await storyboardSkillWithSpecification(card);if(!migrateContinuation&&!skill)continue;button.querySelector('span').textContent=(migrateContinuation?'Preparing continuity and skill contract for':'Applying '+skill.name+' to')+' Scene '+(index+1)+'…';const originalPrompt=card.original_prompt||card.prompt;const refined=await api('/api/prompt/format',{method:'POST',body:{idea:migrateContinuation?storyboardCreativeBody(card.prompt):card.prompt,style:(draft.style_profile||{}).prompt||'',frames:cardFrames,character_ids:context.character_ids,character_reference_ids:context.character_reference_ids,reference_media_ids:context.reference_media_ids,continuity_reference:context.continuity_reference,mode:context.mode,task:'scene',use_ai:!structured,prompt_skill_id:skill&&skill.id,answers:{skill_instruction:promptSkillInstruction(skill),continuity:context.continuity}}});card.original_prompt=originalPrompt;card.refined_prompt=refined.expanded_idea;card.skill_compilation=refined.skill_compilation;card.prompt=refined.prompt;card.guide_answers={...(card.guide_answers||{}),prompt_skill_id:skill&&skill.id,skill_instruction:promptSkillInstruction(skill),continuity:context.continuity};}
-    const payload={id:draft.id,style_profile:draft.style_profile,use_project_style:true,output:{width:dims[0],height:dims[1],frames:clamp(+out.frames||56,8,360),steps:clamp(+out.steps||30,1,h3mlx?30:60),seed:+out.seed||42,quality:out.quality||'high',layers:quality.layers,reuse:quality.reuse,audio_mode:out.audio_mode||'effects',audio_notes:out.audio_notes||''},scenes:draft.scenes};
+    const payload={id:draft.id,style_profile:draft.style_profile,use_project_style:draft.use_project_style!==false,output:{width:dims[0],height:dims[1],frames:clamp(+out.frames||56,8,360),steps:clamp(+out.steps||30,1,h3mlx?30:60),seed:+out.seed||42,quality:out.quality||'high',layers:quality.layers,reuse:quality.reuse,audio_mode:out.audio_mode||'effects',audio_notes:out.audio_notes||''},scenes:draft.scenes};
     button.querySelector('span').textContent='Queuing storyboard…';const result=await api('/api/storyboards/generate',{method:'POST',body:payload});storyboardDraft=null;closeStoryboard();$('#genType').value='video';applyGenerationType();toast(result.scenes.length+' scenes queued in order','ok');await refresh(true);}catch(error){toast(error.message,'err');}finally{storyboardSubmitting=false;$('#storyboardWorkspace').classList.remove('storyboardSubmitting');if(storyboardDraft)updateStoryboardSummary();}
 }
 
@@ -2599,10 +2617,7 @@ function renderGenerate() {
   const profile = state.style_profile || { name: state.base_prompt ? 'Custom project style' : 'No project style', prompt: state.base_prompt || '' };
   if (profile.skill_id && (!selectedTemplate || selectedTemplate.id !== profile.skill_id)) selectedTemplate = promptTemplates.find(t => t.id === profile.skill_id) || null;
   if (styleEl && document.activeElement !== styleEl) styleEl.value = profile.prompt || '';
-  const hasStyle=!!String(profile.prompt||'').trim();
-  // Shared style has one simple state: present means applied. Normalize older
-  // projects that saved text while the former on/off switch was disabled.
-  if(hasStyle&&state.style_enabled===false){state.style_enabled=true;api('/api/project',{method:'POST',body:{style_enabled:true}}).catch(()=>{});}
+  $('#sharedStyleEnabled').checked=state.style_enabled!==false;
 
   // Cast is opt-in per scene; selected members appear as removable context.
   if (!selCharsInitialized) selCharsInitialized = true;
@@ -2632,21 +2647,55 @@ function renderGenerate() {
   const aspect=$('#genAspect');if(aspect)aspect.value=canvasAspect(state.canvas);
 }
 
+function syncVideoModelCards(){
+  const entries=[
+    {id:'h3',backend:'h3-metal',name:'MiniMax H3',type:'Video',detail:'h3.c · Text, image references and opening frames'},
+    {id:'h3mlx',backend:'h3mlx',name:'H3MLX',type:'Video',detail:'Text, image references and opening frames'},
+    {id:'fastvideo',backend:'fastvideo',name:'FastVideo',type:'Video',detail:'Text and image references · 8 passes · 5–15 seconds'}
+  ];
+  for(const entry of entries){const ready=(engine&&engine.video_backends||[]).find(item=>item.id===entry.backend);entry.available=ready?!!ready.ready:!!(engine&&engine.h3_bin_ok&&(entry.id==='h3'||entry.backend===engine.h3_backend));const current=MODEL_CATALOG.find(item=>item.id===entry.id);if(current)Object.assign(current,entry);else MODEL_CATALOG.push(entry);}
+  selectedModel=(engine&&engine.h3_backend)==='h3-metal'?'h3':engine&&engine.h3_backend||'h3';
+  const active=MODEL_CATALOG.find(item=>item.id===selectedModel);
+  $('#modelPickerBtn').textContent='▣ Models · '+(active?active.name:'H3');
+}
 function syncMusicModelCard(){const runtime=musicRuntime(),entry=(typeof MODEL_CATALOG!=='undefined'?MODEL_CATALOG:[]).find(item=>item.id==='music');if(!entry)return;
   entry.available=musicReady();
   entry.detail=runtime?(runtime.ready?('Song composer · '+(runtime.device||'local runtime')+' · description, lyrics, plan, score, seed'):('Not ready · '+(((runtime.missing||[]).join(' · '))||'no runtime selected'))):'Music generation · runtime not detected';
   entry.note=runtime&&!runtime.ready?'Install YuE 2 in Models':'';}
+function fastVideoConflict(){
+  if(!engine||engine.h3_backend!=='fastvideo'||$('#genType').value!=='video')return '';
+  if(sourceSelection)return 'FastVideo can’t use an opening frame.';
+  if(+$('#genFrames').value<120)return 'FastVideo needs at least 5 seconds.';
+  return '';
+}
+function renderModelCapability(){
+  const box=$('#modelCapabilityNotice');if(!box)return;
+  const message=fastVideoConflict();box.hidden=!message;
+  if(!message){box.replaceChildren();return;}
+  const text=document.createElement('div');text.textContent=message;box.replaceChildren(text);
+  if(!sourceSelection){const duration=document.createElement('button');duration.className='btn primary';duration.textContent='Use 5 seconds';duration.onclick=()=>{$('#genFrames').value=120;updateSecsHint();renderModelCapability();};box.appendChild(duration);}
+  const change=document.createElement('button');change.className='btn ghost';change.textContent='Switch to H3';
+  change.onclick=async()=>{change.disabled=true;try{const management=await api('/api/models/manage');const replacement=(management.installations||[]).find(item=>item.available&&['h3-metal','h3mlx'].includes(item.backend_id));if(!replacement){text.textContent='Install H3 to use this option.';change.textContent='Open settings';change.onclick=()=>setHubView('settings');change.disabled=false;return;}await api('/api/models/select',{method:'POST',body:{kind:'h3_backend',model_id:replacement.backend_id,role:'video_generation'}});await refresh();applyGenerationType();renderModelCapability();}catch(error){text.textContent=error.message;change.disabled=false;}};
+  box.appendChild(change);
+}
+
 function applyGenerationType() {
+  syncVideoModelCards();
   syncMusicModelCard();
   const select=$('#genType'),controls=$('#videoGenerationControls'),notice=$('#generationTypeNotice'),button=$('#genBtn');
   if(!select||!controls||!notice||!button)return;
   const type=select.value||'video';
+  button.closest('.generateFooter').hidden=type==='storyboard';
   if(!select.value)select.value='video';
   const isVideo=type==='video',isImage=type==='image',isStoryboard=type==='storyboard',isMusic=type==='music';
   $('#imageModelRow').hidden=!isImage;
   const qwenImage=isImage&&$('#imageModel').value==='qwen-image';
-  ['genQuality','genSteps'].forEach(id=>{$('#'+id).closest('.field').hidden=qwenImage;});
-  $('#modelPickerBtn').hidden=qwenImage;
+  const fastvideo=isVideo&&engine&&engine.h3_backend==='fastvideo';
+  ['genQuality','genSteps'].forEach(id=>{$('#'+id).closest('.field').hidden=qwenImage||fastvideo;});
+  $('#genFrames').min=fastvideo?'120':'8';
+  if(fastvideo)$('#genSteps').value=8;
+  renderModelCapability();
+  $('#modelPickerBtn').hidden=isImage;
   const keepResolution=$('#genResolution').value;
   $('#genResolution').innerHTML=qwenImage?'<option value="native">1024 px</option><option value="preview">512 px · Preview</option>':'<option value="native">Native 768p</option><option value="preview">Preview</option>';
   if(keepResolution)$('#genResolution').value=keepResolution;
@@ -2658,7 +2707,7 @@ function applyGenerationType() {
   button.querySelector('span').textContent=generationSubmitting?'Generating…':(isMusic?'Generate song':isImage?'Generate image':isVideo?'Generate scene':'Generation unavailable');
   $('#genPrompt').placeholder=isImage?'Describe one finished image: subject, composition, environment, lighting, materials, and exact text…':'Describe the scene, action, camera, dialogue or visible text…';
   if(isImage){notice.innerHTML='';sourceSelection=null;renderSourceContext();}
-  else if(isStoryboard){notice.innerHTML='<strong>Build a continuous multi-scene sequence</strong><span>Use one project style and output setup across horizontally arranged scene prompts. Previous-frame continuity is enabled by default.</span><button id="openStoryboardBtn" class="btn primary" type="button">Open storyboard full screen</button>';$('#openStoryboardBtn').addEventListener('click',openStoryboard);}
+  else if(isStoryboard){notice.innerHTML='<button id="openStoryboardBtn" class="btn primary" type="button">Open storyboard full screen</button>';$('#openStoryboardBtn').addEventListener('click',openStoryboard);}
   else if(isMusic){notice.innerHTML=musicNoticeMarkup();const jump=$('#musicGoSettings');if(jump)jump.addEventListener('click',()=>setHubView('settings'));bindMusicComposer();compileMusicPreview(true);}
 }
 
@@ -2762,6 +2811,7 @@ function applyDurationSeconds(seconds) {
   updateSecsHint(); renderGenerate();
 }
 function renderSourceContext() {
+  renderModelCapability();
   const b = $('#sourcePickerBtn'); if (!b) return;
   if (!sourceSelection) { b.textContent = '＋ Continue frame from media'; b.classList.remove('on'); $('#sourceClearBtn').classList.remove('on'); b.title = 'Choose a frame from a scene, video, or image'; const refs = selectedReferenceCount(); $('#composerMode').textContent = refs && engine && engine.ref2va ? 'Ref2VA' : 'T2VA'; return; }
   b.textContent = sourceSelection.name + ' · ' + (sourceSelection.frame === 'first' ? 'First frame' : sourceSelection.frame === 'last' ? 'Last frame' : 'Image');
@@ -2793,6 +2843,7 @@ async function generate() {
   const generationType=$('#genType').value==='image'?'image':'video';
   const prompt = $('#genPrompt').value.trim();
   if (!prompt) { toast('Write a prompt first', 'err'); return; }
+  if(fastVideoConflict()){renderModelCapability();$('#modelCapabilityNotice').scrollIntoView({block:'nearest'});return;}
   recoverStructuredPromptCast(prompt);
   generationSubmitting = true;
   const genButton = $('#genBtn');
@@ -2810,7 +2861,7 @@ async function generate() {
     dimensions[0]=landscape?Math.round(side*16/9/32)*32:side;
     dimensions[1]=portrait?Math.round(side*16/9/32)*32:side;
   }
-  const h3mlx=engine&&engine.h3_backend==='h3mlx';
+  const fastvideo=engine&&engine.h3_backend==='fastvideo',h3mlx=engine&&engine.h3_backend==='h3mlx';
   const quality = h3mlx?{
     balanced: { steps: 20, layers: 35, reuse: 2 },
     high: { steps: 30, layers: 35, reuse: 1 },
@@ -2821,7 +2872,7 @@ async function generate() {
     reference: { steps: 50, layers: 50, reuse: 1 }
   }[$('#genQuality').value] || { steps: 30, layers: 50, reuse: 1 };
   const params = { width: dimensions[0], height: dimensions[1],
-    frames: generationType==='image'?5:+$('#genFrames').value, steps: clamp(+$('#genSteps').value || quality.steps, 1, h3mlx?30:60), layers: quality.layers,
+    frames: generationType==='image'?5:+$('#genFrames').value, steps: fastvideo&&generationType==='video'?8:clamp(+$('#genSteps').value || quality.steps, 1, h3mlx?30:60), layers: quality.layers,
     reuse: quality.reuse, seed: +$('#genSeed').value || 42,
     quality: $('#genQuality').value, audio_mode: $('#genAudioMode').value };
   // persist the style, then create + run the scene. character_ids is sent
@@ -4075,10 +4126,10 @@ function setHubView(view) {
   if (view === 'settings') renderSettings();
 }
 
-function modelSettingsFingerprint(value){const installs=value.model_installs||{};return JSON.stringify([(value.qwen_image||{}).ready,value.h3_bin_ok,value.fl2va,value.ref2va,value.formatter,value.ffmpeg,Object.entries(installs).sort(([a],[b])=>a.localeCompare(b)).map(([id,job])=>[id,job?.status||''])]);}
+function modelSettingsFingerprint(value){const installs=value.model_installs||{};return JSON.stringify([(value.fastvideo||{}).ready,value.h3_backend,(value.qwen_image||{}).ready,value.h3_bin_ok,value.fl2va,value.ref2va,value.formatter,value.ffmpeg,Object.entries(installs).sort(([a],[b])=>a.localeCompare(b)).map(([id,job])=>[id,job?.status||''])]);}
 function updateModelInstallProgress(){
   const installs=engine.model_installs||{};
-  for(const [component,verb] of [['h3','Downloading'],['formatter','Installing'],['runtime','Installing'],['yue','Installing'],['qwen-image','Installing']]){
+  for(const [component,verb] of [['h3','Downloading'],['h3mlx','Installing'],['fastvideo','Installing'],['formatter','Installing'],['runtime','Installing'],['yue','Installing'],['qwen-image','Installing']]){
     const job=installs[component]||{};
     if(job.status!=='running')continue;
     const label=verb+'…'+(Number.isFinite(job.progress)?' '+job.progress+'%':'');
@@ -4101,6 +4152,10 @@ function openModelLicense(item){
   const music=item.media==='music',image=item.media==='image';
   $('#modelLicenseSubtitle').textContent=image?'Review Qwen Image terms before downloading.':music?'Review YuE 2 model terms before downloading.':item.id==='h3mlx'?'Review the experimental engine terms before installation.':'Review and accept the MiniMax H3 terms before the download begins.';
   $('#modelLicenseBody').innerHTML=image?'<div class="licenseReview"><p>Qwen Image uses the Qwen Research License for noncommercial evaluation. Commercial use requires a separate license. The model and isolated runtime stay in OpenMagia’s managed folder on this disk.</p><a class="btn ghost" href="https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE" target="_blank" rel="noopener">Read the complete license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the Qwen Image license.</span></label></div>':music?'<div class="licenseReview"><p>YuE 2 code is Apache-2.0. Its model weights are CC BY-NC 4.0 and download to this user’s Hugging Face cache; the runtime stays in the ignored <code>addons/yue</code> folder.</p><a class="btn ghost" href="https://github.com/multimodal-art-projection/YuE/blob/main/MODEL_LICENSE" target="_blank" rel="noopener">Read the model license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the YuE 2 model license.</span></label></div>':'<div class="licenseReview"><p>'+(item.id==='h3mlx'?'H3MLX is an experimental MIT-licensed engine and reuses your existing MiniMax H3 weights. Its complete managed engine is stored in <code>addons/h3mlx</code>.':'This backend uses MiniMax H3 weights and is governed by the MiniMax H3 Community License. OpenMagia will download the backend into this computer’s managed models folder.')+'</p><a class="btn ghost" href="'+(item.id==='h3mlx'?'https://github.com/robzombai/h3mlx/blob/master/LICENSE':'https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE')+'" target="_blank" rel="noopener">Read the complete license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the applicable license.</span></label></div>';
+  if(item.id==='fastvideo'){
+    $('#modelLicenseSubtitle').textContent='Review FastVideo and the distilled MiniMax H3 model terms.';
+    $('#modelLicenseBody').innerHTML='<div class="licenseReview"><p>FastVideo code is Apache-2.0. FastH3 weights retain the MiniMax H3 Community License. This optional module installs separate Trim and Omni checkpoints and an isolated MLX runtime (about 170 GB including conversion sources). It supports text and image references; exact opening-frame anchors are unavailable. Generation stays local.</p><a class="btn ghost" href="https://github.com/hao-ai-lab/FastVideo/blob/main/LICENSE" target="_blank" rel="noopener">FastVideo license ↗</a><a class="btn ghost" href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noopener">MiniMax H3 model license ↗</a><label><input id="modelLicenseAccept" type="checkbox"><span>I have read and accept the applicable licenses.</span></label></div>';
+  }
   const confirm=$('#modelLicenseConfirm');confirm.disabled=true;confirm.textContent='Accept and download';
   $('#modelLicenseAccept').addEventListener('change',event=>{confirm.disabled=!event.target.checked;});
   const sheet=$('#modelLicenseSheet');sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');$('#modelLicenseClose').focus({preventScroll:true});
@@ -4135,14 +4190,14 @@ async function renderSettings() {
   const formatterInstall=fs.kind==='ready'?'':'<div class="modelInstallRow '+fs.kind+'"><span><b>Prompt refinement</b><small>Qwen2.5 7B · 4.7 GB</small>'+installError(fi)+'</span><strong>'+fs.label+'</strong><button class="btn ghost modelInstall" data-install-model="formatter" '+(fs.disabled?'disabled':'')+'>'+fs.button+'</button></div>';
   const runtimeInstall=rs.kind==='ready'?'':'<div class="modelInstallRow '+rs.kind+'"><span><b>Generation tools</b><small>FFmpeg</small>'+installError(ri)+'</span><strong>'+rs.label+'</strong><button class="btn ghost modelInstall" data-install-model="runtime" '+(rs.disabled?'disabled':'')+'>'+rs.button+'</button></div>';
   const music=management.music||{},musicSelection=music.selection||{},musicJob=(e.model_installs||{}).yue||{};
-  const generationModels=(management.installations||[]).filter(item=>item.available).map(item=>{const video=!['yue2','qwen2.5-7b','qwen-image'].includes(item.backend_id),role=item.backend_id==='qwen-image'?'Image generation':item.backend_id==='yue2'?'Music generation':item.backend_id==='qwen2.5-7b'?'Prompt refinement':'Video generation',component=item.backend_id==='qwen-image'?'qwen-image':item.backend_id==='yue2'?'yue':item.backend_id==='qwen2.5-7b'?'formatter':item.backend_id==='h3mlx'?'h3mlx':'h3',job=(e.model_installs||{})[component]||{},updating=job.status==='running';return '<div class="managedModelRow"><span><b>'+esc(item.name||'Model')+'</b><small>'+role+(item.backend_id==='h3mlx'?' · Experimental':'')+'</small></span><em>'+(item.active?'Active':'Installed')+'</em>'+(item.managed?'<div class="managedModelActions">'+(video&&!item.active?'<button class="btn primary" data-use-video-backend="'+esc(item.backend_id)+'">Use for video</button>':'')+'<button class="btn ghost" data-update-model="'+component+'" '+(updating?'disabled':'')+'>'+(updating?'Checking…':'Check for updates')+'</button><button class="btn ghost danger" data-uninstall-model="'+esc(item.id)+'">Uninstall</button></div>':'<small>External</small>')+'</div>';}).join('');
+  const generationModels=(management.installations||[]).filter(item=>item.available||(item.backend_id==='fastvideo'&&item.present)).map(item=>{const video=!['yue2','qwen2.5-7b','qwen-image'].includes(item.backend_id),role=item.backend_id==='qwen-image'?'Image generation':item.backend_id==='yue2'?'Music generation':item.backend_id==='qwen2.5-7b'?'Prompt refinement':'Video generation',component=item.backend_id==='fastvideo'?'fastvideo':item.backend_id==='qwen-image'?'qwen-image':item.backend_id==='yue2'?'yue':item.backend_id==='qwen2.5-7b'?'formatter':item.backend_id==='h3mlx'?'h3mlx':'h3',job=(e.model_installs||{})[component]||{},updating=job.status==='running';return '<div class="managedModelRow"><span><b>'+esc(item.name||'Model')+'</b><small>'+role+(['h3mlx','fastvideo'].includes(item.backend_id)?' · Experimental':'')+'</small></span><em>'+(item.available?(item.active?'Active':'Installed'):'Download incomplete')+'</em>'+(item.managed?'<div class="managedModelActions">'+(video&&item.available&&!item.active?'<button class="btn primary" data-use-video-backend="'+esc(item.backend_id)+'">Use for video</button>':'')+'<button class="btn ghost" data-update-model="'+component+'" '+(updating?'disabled':'')+'>'+(updating?'Checking…':'Check for updates')+'</button><button class="btn ghost danger" data-uninstall-model="'+esc(item.id)+'">Uninstall</button></div>':'<small>External</small>')+'</div>';}).join('');
   const installed=generationModels||'<p class="modelEmpty">No models are installed. Choose one from Available or Add-ons.</p>';
   const availableItems=(management.catalog||[]).filter(item=>item.compatible);
   const available=availableItems.map(item=>{const job=(e.model_installs||{})[item.install_component]||{},running=job.status==='running',failed=job.status==='error',progress=Number.isFinite(job.progress)?' '+job.progress+'%':'';return '<div class="backendCard"><div class="backendTitle"><b>'+esc(item.name.replace(' · Metal','').replace(' · music',''))+'</b></div><p>'+esc(item.summary)+'</p><small>'+esc((item.media==='music'?'Music':item.media==='image'?'Image':'Video')+' generation · '+item.disk_gb+' GB disk')+'</small>'+(failed?'<small class="modelInstallError">'+esc(job.message||'Installation failed')+'</small>':'')+'<div class="backendActions">'+(item.installed?'<span>Installed</span>':item.requirements_met?'<button class="btn ghost" data-install-backend="'+esc(item.id)+'" data-install-component="'+esc(item.install_component)+'" '+(running?'disabled':'')+'>'+(running?'Downloading…'+progress:'Install')+'</button>':'<span>Unavailable on this computer</span>')+'</div></div>';}).join('')||'<div class="modelUnavailable"><b>No local generation models are available for this computer.</b></div>';
   const legacyLoras=(management.loras||[]).map(item=>'<div class="loraRow" data-lora="'+esc(item.id)+'"><span><b>'+esc(item.name)+'</b><small>YuE 2 adapter · available in the music composer</small></span><button class="btn ghost danger" data-remove-lora>Remove file</button></div>').join('');
     body.innerHTML = '<article class="settingsCard modelSettings"><div class="settingsCardHead"><div><h2>Models</h2><small>Manage generation and refinement models.</small></div></div><div class="modelManagerTabs" role="tablist"><button class="on" data-model-tab="installed">Installed</button><button data-model-tab="available">Available</button><button data-model-tab="addons">Add-ons</button></div><section class="modelManagerPane on" data-model-pane="installed"><div class="managedModelList">'+installed+'</div><details class="modelConnect"><summary>Connect an existing model</summary><section class="modelSelection"><div class="modelSelectionHead"><span>Models already downloaded outside OpenMagia</span><button class="btn ghost" id="detectModels">Scan</button></div><div class="modelSelectionFields"><label><select id="detectedModelSelect" class="txt" aria-label="Installed model" disabled><option>Scanning…</option></select></label><label><select id="detectedModelRole" class="txt" aria-label="Model role" disabled><option>Role</option></select></label><button class="btn primary" id="useSelectedModel" disabled>Use</button></div><div id="detectedModelMeta" class="modelSelectionMeta"></div></section></details></section><section class="modelManagerPane" data-model-pane="available"><div class="backendGrid">'+available+'</div></section><section class="modelManagerPane" data-model-pane="addons"><div class="modelInstallOptions">'+formatterInstall+runtimeInstall+'</div><div class="loraHead"><div><b>YuE 2 adapters</b><small>Add and select an adapter directly from the music composer. H3 adapters remain unavailable.</small></div></div>'+(legacyLoras?'<div class="loraList">'+legacyLoras+'</div>':'')+'</section></article>' +
     '<article class="settingsCard aboutCard"><h2>About OpenMagia</h2><p>OpenMagia is a local-first visual workspace for composing, generating, and editing AI video.</p><div class="appVersionRow"><b>Version</b><span>'+esc(versionLabel)+'</span></div><div><b>Source code</b><a href="https://github.com/davidaircloud/OpenMagia" target="_blank" rel="noopener">GitHub repository ↗</a></div><div><b>License</b><span>AGPL-3.0-only</span></div><small>OpenMagia is free software under the GNU Affero General Public License v3.0 only and comes without warranty.</small></article>'+
-    '<article class="settingsCard noticesCard"><h2>Models and open-source notices</h2><div><b>MiniMax H3</b><span>© 2026 MiniMax · Community License</span></div><div><b>Qwen2.5 7B Instruct</b><span>Apache License 2.0</span></div><div><b>YuE 2 runtime</b><span>m-a-p · Apache License 2.0</span></div><div><b>YuE 2 model weights</b><span>m-a-p · CC BY-NC 4.0</span></div><div><b>h3.c</b><span>© 2026 Salvatore Sanfilippo · MIT</span></div><div><b>Qwen Image</b><span>Qwen Research License · noncommercial evaluation</span></div><div><b>H3MLX</b><span>RobZombAI · MIT · experimental optional backend</span></div><div><b>ffmpeg-skill</b><span><a href="https://github.com/kajisho5/ffmpeg-skill/tree/v0.12.0" target="_blank" rel="noopener">v0.12.0</a> · © 2026 kajisho5 · MIT · workflow inspiration</span></div><div><b>ccv Metal kernels</b><span>© 2010 Liu Liu · BSD-3-Clause</span></div><div><b>llama.cpp / ggml</b><span>© 2023–2026 ggml authors · MIT</span></div><div><b>FFmpeg</b><span>LGPL 2.1+ / optional GPL components</span></div><small>OpenMagia adapts ffmpeg-skill’s typed plan-before-render and verification ideas to its own non-destructive timeline model; no ffmpeg-skill source is bundled. Full terms remain with the linked projects and model sources.</small></article>';
+    '<article class="settingsCard noticesCard"><h2>Models and open-source notices</h2><div><b>MiniMax H3</b><span>© 2026 MiniMax · Community License</span></div><div><b>Qwen2.5 7B Instruct</b><span>Apache License 2.0</span></div><div><b>YuE 2 runtime</b><span>m-a-p · Apache License 2.0</span></div><div><b>YuE 2 model weights</b><span>m-a-p · CC BY-NC 4.0</span></div><div><b>h3.c</b><span>© 2026 Salvatore Sanfilippo · MIT</span></div><div><b>Qwen Image</b><span>Qwen Research License · noncommercial evaluation</span></div><div><b>FastVideo / FastH3</b><span>Apache-2.0 code · MiniMax H3 Community License weights · optional MLX backend</span></div><div><b>H3MLX</b><span>RobZombAI · MIT · experimental optional backend</span></div><div><b>ffmpeg-skill</b><span><a href="https://github.com/kajisho5/ffmpeg-skill/tree/v0.12.0" target="_blank" rel="noopener">v0.12.0</a> · © 2026 kajisho5 · MIT · workflow inspiration</span></div><div><b>ccv Metal kernels</b><span>© 2010 Liu Liu · BSD-3-Clause</span></div><div><b>llama.cpp / ggml</b><span>© 2023–2026 ggml authors · MIT</span></div><div><b>FFmpeg</b><span>LGPL 2.1+ / optional GPL components</span></div><small>OpenMagia adapts ffmpeg-skill’s typed plan-before-render and verification ideas to its own non-destructive timeline model; no ffmpeg-skill source is bundled. Full terms remain with the linked projects and model sources.</small></article>';
   $$('[data-model-tab]',body).forEach(tab=>tab.addEventListener('click',()=>{$$('[data-model-tab]',body).forEach(x=>x.classList.toggle('on',x===tab));$$('[data-model-pane]',body).forEach(x=>x.classList.toggle('on',x.dataset.modelPane===tab.dataset.modelTab));}));
   $$('[data-install-backend]',body).forEach(button=>button.addEventListener('click',()=>{const item=(management.catalog||[]).find(entry=>entry.id===button.dataset.installBackend);if(item)openModelLicense(item);}));
   $$('[data-uninstall-model]',body).forEach(button=>button.addEventListener('click',()=>openModelUninstall(button.dataset.uninstallModel,management)));
@@ -4553,6 +4608,9 @@ function bindEvents() {
   $('#storyboardGenerate').addEventListener('click',generateStoryboard);
   $('#continuityReviewClose').addEventListener('click',closeContinuityReview);$('#continuityReviewCancel').addEventListener('click',closeContinuityReview);$('#continuityReviewScrim').addEventListener('click',closeContinuityReview);$('#continuityReviewConfirm').addEventListener('click',confirmContinuityReview);
   $('#storyboardStyle').addEventListener('input',scheduleStoryboardSave);
+  $('#storyboardStyleExpand').addEventListener('click',()=>{const body=$('#storyboardStyleBody');body.hidden=!body.hidden;$('#storyboardStyleExpand').setAttribute('aria-expanded',String(!body.hidden));});
+  $('#storyboardStyleEnabled').addEventListener('change',event=>{ensureStoryboardDraft().use_project_style=event.target.checked;scheduleStoryboardSave();});
+  $('#sharedStyleEnabled').addEventListener('change',async event=>{const enabled=event.target.checked;state.style_enabled=enabled;try{await api('/api/project',{method:'POST',body:{style_enabled:enabled}});}catch(error){toast(error.message,'err');}});
   ['#storyboardAspect','#storyboardResolution','#storyboardSteps','#storyboardSeed','#storyboardAudioMode','#storyboardAudioNotes'].forEach(id=>$(id).addEventListener('change',scheduleStoryboardSave));
   $('#storyboardQuality').addEventListener('change',()=>{const h3mlx=engine&&engine.h3_backend==='h3mlx';$('#storyboardSteps').value=({balanced:20,high:30,reference:h3mlx?30:50})[$('#storyboardQuality').value]||30;scheduleStoryboardSave();});
   document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if($('#musicLyricsSheet').classList.contains('on'))closeMusicLyricsSheet();else if($('#modelLicenseSheet').classList.contains('on'))closeModelLicense();else if($('#modelUninstallSheet').classList.contains('on'))closeModelUninstall();else if($('#timelineMagiaSheet').classList.contains('on'))closeTimelineMagia();else if($('#continuityReviewSheet').classList.contains('on'))closeContinuityReview();else if($('#storyboardReferencePicker').classList.contains('on'))closeStoryboardReferencePicker();else if($('#magiaSheet').classList.contains('on'))closeMagia();else if($('#storyboardWorkspace').classList.contains('on')&&!storyboardSubmitting)closeStoryboard();});
@@ -4586,7 +4644,7 @@ function bindEvents() {
   $('#genStyle').addEventListener('change', () => {
     const prompt = $('#genStyle').value.trim();
     const profile = { name: prompt ? 'Custom project style' : 'No project style', prompt, skill_id: null, source: 'custom' };
-    api('/api/project', { method: 'POST', body: { style_profile: profile, style_enabled:true } }).then(() => { state.style_profile = profile; state.style_enabled=true; renderGenerate(); }).catch(() => {});
+    api('/api/project', { method: 'POST', body: { style_profile: profile, style_enabled:state.style_enabled!==false } }).then(() => { state.style_profile = profile; renderGenerate(); }).catch(() => {});
   });
   $('#genStyle').addEventListener('pointerup',()=>setTimeout(saveProjectLayout,0));
   $('#genPrompt').addEventListener('pointerup',()=>setTimeout(saveProjectLayout,0));

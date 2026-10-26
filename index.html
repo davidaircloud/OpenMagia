@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260923-music-composer-v1">
+<link rel="stylesheet" href="style.css?v=20261026-fastvideo-v2">
 </head>
 <body>
 
@@ -113,16 +113,9 @@
       <div class="chead generateTypeHead"><h3>Generate</h3><label><span>Type</span><select id="genType" class="txt" aria-label="Generation type"><option value="video" selected>Video</option><option value="storyboard">Storyboard</option><option value="image">Image (Beta)</option><option value="music">Music</option></select></label></div>
       <div class="generateScroll">
       <div id="generationTypeNotice" class="generationTypeNotice" hidden></div>
-      <label id="imageModelRow" hidden>Image model<select id="imageModel" class="txt"><option value="h3">MiniMax H3 · still frame</option><option value="qwen-image">Qwen-Image-2.1-Turbo</option></select></label>
+      <div id="modelCapabilityNotice" class="modelCapabilityNotice" role="status" hidden></div>
+      <div id="imageModelRow" class="imageModelField field" hidden><label for="imageModel">Model</label><select id="imageModel" class="txt"><option value="h3">MiniMax H3 · still frame</option><option value="qwen-image">Qwen-Image-2.1-Turbo</option></select></div>
       <div id="videoGenerationControls">
-      <section class="projectStyleCard" id="sharedStyleDetails">
-        <button class="projectStyleTop" id="sharedStyleExpand" type="button" aria-expanded="false" aria-controls="sharedStyleBody"><span><span class="scopeLabel">SHARED STYLE</span><small>Applied to every scene</small></span><svg class="sharedStyleChevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
-        <div class="projectStyleBody" id="sharedStyleBody" hidden>
-          <p>Project-wide visual rules only. Write this scene’s action in the main prompt below.</p>
-          <textarea class="txt" id="genStyle" placeholder="Optional stable look: medium, palette, lighting, lenses, materials, and details that must stay consistent…"></textarea>
-          <div class="styleComposerBar"><button id="styleRefineBtn" class="composerTool refineAction" type="button">✦ Refine</button></div>
-        </div>
-      </section>
       <section class="h3Composer">
         <label class="composerPromptLabel" for="genPrompt"><span>PROMPT</span></label>
         <div id="activePromptSkills" class="activePromptSkills"></div>
@@ -131,6 +124,14 @@
         <input id="referenceFile" type="file" accept="image/*,audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,.opus" multiple hidden>
         <div class="composerMeta"><span id="composerMode">T2VA</span><span id="composerRefs">0 / 9 references</span><span id="composerDuration">2.3s</span></div>
         <div class="composerBar"><button id="modelPickerBtn" class="composerTool">▣ Models · H3</button><button id="promptSkillBtn" class="composerTool">✣ Skills</button><button id="guideBtn" class="composerTool refineAction">✦ Refine</button></div>
+      </section>
+      <section class="optionalStyle" id="sharedStyleDetails">
+        <button class="composerTool optionalStyleToggle" id="sharedStyleExpand" type="button" aria-expanded="false" aria-controls="sharedStyleBody"><span>Shared style</span><svg class="sharedStyleChevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
+        <div class="projectStyleBody" id="sharedStyleBody" hidden>
+          <label class="optionalStyleEnabled"><input id="sharedStyleEnabled" type="checkbox"> Apply to this project</label>
+          <textarea class="txt" id="genStyle" placeholder="Optional stable look: medium, palette, lighting, lenses, materials, and details that must stay consistent…"></textarea>
+          <div class="styleComposerBar"><button id="styleRefineBtn" class="composerTool refineAction" type="button">✦ Refine</button></div>
+        </div>
       </section>
       <section class="generationOptions">
         <div class="generationGroup">
@@ -394,11 +395,13 @@
     </header>
     <main class="storyboardBody">
       <section class="storyboardShared storyboardStyleSection">
-        <div class="storyboardSectionHead"><div><h2>Shared instructions</h2></div></div>
-        <textarea id="storyboardStyle" class="txt" placeholder="Describe the stable world, identity, materials, camera language, lighting, and details that must not change."></textarea>
+        <button id="storyboardStyleExpand" class="composerTool optionalStyleToggle" type="button" aria-expanded="false" aria-controls="storyboardStyleBody">Shared style <span aria-hidden="true">⌄</span></button>
+        <div id="storyboardStyleBody" hidden><label class="optionalStyleEnabled"><input id="storyboardStyleEnabled" type="checkbox"> Apply to every scene</label>
+        <textarea id="storyboardStyle" class="txt" placeholder="Describe the stable world, identity, materials, camera language, lighting, and details that must not change."></textarea></div>
       </section>
       <section class="storyboardPromptsSection">
-        <div class="storyboardSectionHead"><div><h2>Scenes</h2><p>Each scene inherits the shared instructions. Scene 2 onward can continue from the previous scene.</p></div><div class="storyboardSceneHeadActions"><button id="storyboardMagia" class="btn magiaButton"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5L8 21l-5-5L15 4Z"></path><path d="m6 14 5 5"></path><path d="M6 3v4M4 5h4M19 15v4M17 17h4"></path></svg><span>Magia</span></button><button id="storyboardAdd" class="btn ghost">＋ Add scene</button></div></div>
+        <div class="storyboardSectionHead"><div><h2>Scenes</h2><p>Shared style applies when enabled. Scenes can continue from the previous scene.</p></div><div class="storyboardSceneHeadActions"><button id="storyboardMagia" class="btn magiaButton"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5L8 21l-5-5L15 4Z"></path><path d="m6 14 5 5"></path><path d="M6 3v4M4 5h4M19 15v4M17 17h4"></path></svg><span>Magia</span></button><button id="storyboardAdd" class="btn ghost">＋ Add scene</button></div></div>
+        <div id="storyboardModelCapability" class="modelCapabilityNotice" role="status" hidden></div>
         <div id="storyboardScenes" class="storyboardScenes"></div>
       </section>
       <section class="storyboardShared storyboardOutputSection">
@@ -475,6 +478,6 @@
 <input type="file" id="charFile" accept="image/*" style="display:none">
 <input type="file" id="musicLoraFile" accept=".zip,application/zip" style="display:none">
 
-<script src="app.js?v=20261004-h3mlx-progress-v3"></script>
+<script src="app.js?v=20261026-fastvideo-v2"></script>
 </body>
 </html>
