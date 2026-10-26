@@ -96,6 +96,10 @@ The editor launches on macOS, Linux, and Windows, but OpenMagia only advertises 
 
 Apple Silicon systems can install [H3MLX](https://github.com/robzombai/h3mlx) from **Settings → Models → Add-ons** or with `./install.sh --with-h3mlx`. OpenMagia builds it in the ignored `addons/h3mlx` directory, reuses the existing MiniMax H3 weights, applies its tested video-decoder compatibility fix automatically, and validates the repaired pipeline before completing installation. No manual source editing is required. H3MLX-specific generation presets, progress parsing, queue recovery, backend selection, updates, and complete removal are handled by OpenMagia.
 
+### FastVideo video engine (optional)
+
+Install FastVideo from **Settings → Models → Available**, then select **Use for video**. It uses FastH3 Trim for text and FastH3 Omni for image references in a separate MLX runtime. Apple Silicon, at least 36 GB memory, and approximately 170 GB disk space are required. Opening-frame anchors and clips under five seconds show a direct action to switch to H3. [Setup, safety review and benchmark method](docs/FASTVIDEO_INTEGRATION.md). [Measured five-second comparisons and sample videos](benchmarks/2026-10-26-fastvideo/README.md).
+
 ### Music generation (optional)
 
 Songs come from [YuE 2](https://github.com/multimodal-art-projection/YuE) (m-a-p/YuE2-3B). Install it with `./install.sh --with-yue` or from **Settings → Music**.
@@ -142,7 +146,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md), follow the [Code of Conduct](CODE_OF_CO
 
 ## Built with
 
-[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [YuE 2](https://github.com/multimodal-art-projection/YuE) by m-a-p · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · [Qwen2.5 7B Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
+[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) · [YuE 2](https://github.com/multimodal-art-projection/YuE) by m-a-p · [h3.c](https://github.com/antirez/h3.c) by Salvatore Sanfilippo · [FastVideo](https://github.com/hao-ai-lab/FastVideo) by Hao AI Lab · [FFmpeg](https://ffmpeg.org/) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · [Qwen2.5 7B Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
 
 The Character Creator approach was inspired by [PoopMan333's H3 Character Sheet Generator](https://huggingface.co/PoopMan333/H3_Character_Sheet_Generator). OpenMagia is independent and is not affiliated with or endorsed by MiniMax or the projects above. Full attribution and component licenses are in [NOTICE.md](NOTICE.md).
 

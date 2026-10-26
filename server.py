@@ -8,6 +8,7 @@ to a single MP4 via the NLE compositor (nle.py).
 import atexit
 import continuity_repair
 import qwen_image
+import fast_video
 from model_readiness import partition_ready
 import hashlib
 import json
@@ -161,6 +162,12 @@ MODEL_BACKENDS = [
      "memory_min":64, "disk_gb":1, "stability":"experimental", "install_component":"h3mlx",
      "summary":"Experimental Apple Silicon engine with alternate Metal kernels and few-step Frontier sampling. Reuses the installed MiniMax H3 weights.",
      "source":"https://github.com/robzombai/h3mlx", "supports":["t2va","fl2va","ref2va","audio-references"],
+     "media":"video", "role":"video_generation"},
+    {"id":"fastvideo", "name":"FastVideo · FastH3", "provider":"Hao AI Lab",
+     "platforms":["darwin-arm64"], "memory_min":36, "disk_gb":170,
+     "stability":"experimental", "install_component":"fastvideo",
+     "summary":"Text and image-reference video with eight-pass FastH3 models. Requires separate weights.",
+     "source":"https://github.com/hao-ai-lab/FastVideo", "supports":["t2va","ref2va"],
      "media":"video", "role":"video_generation"},
     {"id":"yue2", "name":"YuE 2 · music", "provider":"m-a-p", "platforms":["darwin-arm64","darwin","linux","win32"],
      "memory_min":16, "disk_gb":12, "stability":"stable", "install_component":"yue",
@@ -574,6 +581,12 @@ def model_management_state():
                          "engine_path":str(H3MLX_BIN.resolve()), "managed":True,
                          "receipt":[str(H3MLX_ROOT.resolve())], "imported":True, "media":"video"}
         installations.append(h3mlx_install); _save_model_registry(registry)
+    fv_install = next((item for item in installations if item.get("backend_id") == "fastvideo"), None)
+    if fast_video.state().get("present") and not fv_install:
+        installations.append({"id":"install-fastvideo-managed", "backend_id":"fastvideo",
+                              "name":"FastVideo · FastH3", "path":str(fast_video.HOME),
+                              "managed":True, "receipt":[str(fast_video.HOME)], "media":"video"})
+        _save_model_registry(registry)
     local_music = yue_local_runtime()
     image_install = next((item for item in installations if item.get("backend_id") == "qwen-image"), None)
     if qwen_image.state()["ready"] and not image_install:
@@ -603,10 +616,11 @@ def model_management_state():
                              "receipt":[str(formatter_root)], "imported":True, "media":"refinement"}
         installations.append(formatter_install); _save_model_registry(registry)
     for item in installations:
-        item["active"] = ((item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or
+        item["active"] = ((item.get("backend_id") == "fastvideo" and using_fastvideo()) or
+                          (item.get("backend_id") == "yue2" and yue_selection()["mode"] == "local") or
                           (item.get("backend_id") == "h3mlx" and
                            str(Path(H3_BIN).expanduser().resolve()) == str(H3MLX_BIN.resolve())) or
-                          (item.get("backend_id") == "h3-metal" and item.get("path") == active_path and
+                          (item.get("backend_id") == "h3-metal" and not using_fastvideo() and item.get("path") == active_path and
                            str(Path(H3_BIN).expanduser().resolve()) != str(H3MLX_BIN.resolve())) or
                           (item.get("backend_id") == "qwen2.5-7b" and
                            Path(item.get("path") or "").resolve() == formatter_root and
@@ -614,6 +628,9 @@ def model_management_state():
         item["available"] = Path(item.get("path") or "").exists()
         if item.get("backend_id") == "h3-metal":
             item["available"] = _h3_model_valid(item.get("path") or "")
+        if item.get("backend_id") == "fastvideo":
+            item["available"] = fast_video.state()["ready"]
+            item["present"] = fast_video.state().get("present", False)
         if item.get("backend_id") == "qwen-image":
             item["available"] = qwen_image.state()["ready"]
     hw = hardware_profile(); platform_id = hw["platform"]
@@ -642,6 +659,22 @@ def uninstall_managed_model(installation_id):
     registry = _load_model_registry(); items = registry.get("installations") or []
     item = next((x for x in items if x.get("id") == installation_id), None)
     if not item: raise ValueError("Managed installation not found.")
+    if item.get("backend_id") == "fastvideo":
+        if active_job or queue or model_installs.get("fastvideo", {}).get("status") == "running":
+            raise ValueError("Wait for generation and FastVideo installation to finish before removing it.")
+        target = fast_video.managed_home()
+        if not item.get("managed") or Path(item.get("path") or "").absolute() != target or str(target) not in (item.get("receipt") or []):
+            raise ValueError("OpenMagia has no safe managed FastVideo installation receipt.")
+        was_active = using_fastvideo()
+        if was_active:
+            H3_BIN = str(DEFAULTS["h3_bin"])
+            _saved_model_sources.pop("h3_bin", None)
+            MODEL_SOURCE_FILE.write_text(json.dumps(_saved_model_sources, indent=2) + "\n")
+        if target.exists():
+            shutil.rmtree(target)
+        registry["installations"] = [x for x in items if x.get("id") != installation_id]
+        _save_model_registry(registry)
+        return {"ok":True, "removed":str(target), "active_removed":was_active}
     if item.get("backend_id") == "qwen-image":
         target = Path(item.get("path") or "").resolve()
         allowed = qwen_image.HOME.resolve()
@@ -1322,14 +1355,27 @@ def select_model_source(kind, path="", endpoint="", model_id="", role="", token=
     if role and role != expected_role:
         raise ValueError("That model is not compatible with the selected OpenMagia role.")
     if kind == "h3":
+        if using_fastvideo():
+            if active_job or queue:
+                raise ValueError("Wait for queued generation to finish before switching video engines.")
+            native = Path(DEFAULTS["h3_bin"])
+            if not native.is_file():
+                raise ValueError("Install H3 to use these weights.")
         if not _h3_model_valid(candidate): raise ValueError("That folder is not a complete MiniMax H3 FL2VA + Ref2VA model.")
+        if using_fastvideo():
+            H3_BIN = str(Path(DEFAULTS["h3_bin"]).resolve())
+            _saved_model_sources["h3_bin"] = H3_BIN
         H3_MODEL = str(candidate); _saved_model_sources["h3_model"] = H3_MODEL
     elif kind == "h3_backend":
         backend = next((item for item in MODEL_BACKENDS if item.get("id") == model_id and item.get("media") == "video"), None)
         if not backend: raise ValueError("That video backend is not registered.")
-        engine = H3MLX_BIN if model_id == "h3mlx" else Path(DEFAULTS["h3_bin"])
+        if active_job or queue:
+            raise ValueError("Wait for queued generation to finish before switching video engines.")
+        if model_id == "fastvideo" and not fast_video.state()["ready"]:
+            raise ValueError("Install FastVideo before selecting it.")
+        engine = fast_video.PYTHON if model_id == "fastvideo" else H3MLX_BIN if model_id == "h3mlx" else Path(DEFAULTS["h3_bin"])
         if not engine.is_file(): raise ValueError("Install that video backend before selecting it.")
-        H3_BIN = str(engine.resolve())
+        H3_BIN = str(engine.absolute() if model_id == "fastvideo" else engine.resolve())
         _saved_model_sources["h3_bin"] = H3_BIN
     elif kind == "formatter_file":
         if not candidate.is_file() or supplied.suffix.lower() != ".gguf": raise ValueError("Prompt refinement requires a readable GGUF model file.")
@@ -1426,6 +1472,10 @@ def safe_retry_params(params):
     return fallback
 
 
+def using_fastvideo():
+    return Path(H3_BIN).expanduser().absolute() == fast_video.PYTHON.absolute()
+
+
 def using_h3mlx():
     """Return whether the optional H3MLX executable owns video generation."""
     try:
@@ -1453,6 +1503,10 @@ def h3mlx_generation_params(params):
 def parse_h3_progress_line(line):
     """Parse native H3/H3MLX progress, including carriage-return updates."""
     clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(line or ""))
+    fastvideo_step = re.search(r"H3 denoise step (\d+)/(\d+)", clean)
+    if fastvideo_step:
+        return {"phase":"denoising", "completed":int(fastvideo_step.group(1)),
+                "total":int(fastvideo_step.group(2))}
     # H3MLX renders "phase [bar] 10% (3/30)" while upstream H3 renders
     # "phase 3/30". Locate the counter first, then recover the phase from the
     # text before its progress bar.
@@ -1564,6 +1618,15 @@ def model_update_fingerprint(component):
 def install_model_component(component, update=False):
     """Run an immutable snapshot of the idempotent installer in the background."""
     model_installs[component] = {"status": "running", "message": "Preparing download…"}
+    if component == "fastvideo":
+        try:
+            if active_job or queue:
+                raise ValueError("Wait for generation to finish before installing FastVideo.")
+            fast_video.install(lambda message: model_installs.update({component: {"status":"running", "message":message}}))
+            model_installs[component] = {"status":"current" if update else "ready", "message":"FastVideo is installed at the reviewed revision."}
+        except Exception as exc:
+            model_installs[component] = {"status":"error", "message":str(exc)}
+        return
     if component == "qwen-image":
         try:
             qwen_image.install(lambda message: model_installs.update({component: {"status": "running", "message": message}}))
@@ -2332,6 +2395,10 @@ def create_storyboard_batch(project, payload):
         if continuity_mode == "none":
             source_media_id = None
         params = clamp_generation_params({**shared_params, **dict(card.get("params") or {})})
+        if using_fastvideo():
+            if source_media_id and continuity_mode != "reference":
+                raise ValueError("FastVideo can’t use an opening frame. Switch to H3.")
+            params = fast_video.generation_params(params)
         prompt, timing_repaired = retime_cut_timeline(prompt, params["frames"])
         proposed = {"character_ids": char_ids,
                     "character_reference_ids": character_reference_ids if "character_reference_ids" in card else None,
@@ -5049,6 +5116,9 @@ def run_job(scene_id, project):
         scene["error"] = None
         scene["params"] = clamp_generation_params(
             scene.get("params") or {}, scene.get("generation_type", "video"))
+        fastvideo_job = scene.get("generation_type", "video") == "video" and using_fastvideo()
+        if fastvideo_job:
+            scene["params"] = fast_video.generation_params(scene["params"])
         if scene.get("generation_type", "video") == "video" and using_h3mlx():
             scene["params"] = h3mlx_generation_params(scene["params"])
         pending = next((x for x in project.get("media", []) if x.get("scene_id") == scene_id), None)
@@ -5069,10 +5139,12 @@ def run_job(scene_id, project):
     is_image = scene.get("generation_type") == "image"
     out = pdir / "media" / f"gen-{scene_id}.png" if is_image else pdir / "media" / f"gen-{scene_id}.mp4"
     frames_dir = pdir / "media" / f".image-frames-{scene_id}"
-    ref2va = ref2va_available()
+    ref2va = fastvideo_job or ref2va_available()
     chars = scene_all_references(scene, project)
     # "continue from previous": open this shot on the previous shot's last frame
     source_frame = selected_source_frame(scene, project) or (prev_scene_last_frame(scene_id, project) if scene.get("chain") else None)
+    if fastvideo_job and source_frame and scene.get("continuity_mode") != "reference":
+        raise ValueError("FastVideo can’t use an opening frame. Switch to H3.")
     hybrid_continuity = bool(source_frame and scene.get("continuity_mode") == "reference")
     chain_frame = None if hybrid_continuity else source_frame
     image_idea = str(scene.get("prompt") or "").strip()
@@ -5118,7 +5190,8 @@ def run_job(scene_id, project):
             if stored.get("prompt_skill_id"):
                 stored["skill_compilation"] = compile_skill_contract(stored["prompt_skill_id"])
             save_project(latest)
-    cmd = [H3_BIN, "-d", H3_MODEL, "-p", prompt,
+    native_bin = str(DEFAULTS["h3_bin"]) if using_fastvideo() else H3_BIN
+    cmd = [native_bin, "-d", H3_MODEL, "-p", prompt,
            "-o", "" if is_image else str(out),
            "--width", str(scene["params"]["width"]),
            "--height", str(scene["params"]["height"]),
@@ -5153,13 +5226,30 @@ def run_job(scene_id, project):
         # memory traffic without changing the requested frames or geometry.
         cmd += ["--use-int8-row-fc2"]
 
+    fastvideo_request = None
+    if fastvideo_job:
+        refs = []
+        for group in generation_refs:
+            kind = {"video_reference":"video", "audio_reference":"audio"}.get(group.get("kind"), "image")
+            refs.extend({"type":kind, "path":str(path)} for path in group.get("paths", []))
+        cmd, fastvideo_request = fast_video.command(prompt, out, scene["params"], refs)
+
     progress[scene_id] = {"phase": "loading model and references", "completed": 0, "total": 1,
                           "started_at": time.time(), "first_step_at": None}
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, bufsize=1, cwd=str(Path(H3_BIN).parent),
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE if fastvideo_job else subprocess.DEVNULL,
+                                stderr=subprocess.STDOUT if fastvideo_job else subprocess.PIPE,
+                                stdin=subprocess.PIPE if fastvideo_job else subprocess.DEVNULL,
+                                env=fast_video.environment(offline=True) if fastvideo_job else None,
+                                text=True, bufsize=1, cwd=str(ROOT) if fastvideo_job else str(Path(native_bin).parent),
                                 start_new_session=(os.name != "nt"))
         scene_proc = proc
+        if fastvideo_request is not None:
+            proc.stdin.write(json.dumps(fastvideo_request))
+            proc.stdin.close()
+            # The existing cancellation/stall monitor reads stderr.
+            proc.stderr = proc.stdout
+        fastvideo_result = None
         tail = []
         long_native = bool(scene.get("params", {}).get("stability_adjusted"))
         for line in monitor_h3_process(
@@ -5167,7 +5257,11 @@ def run_job(scene_id, project):
                 stall_timeout=10800 if long_native else H3_STALL_TIMEOUT,
                 hard_timeout=H3_HARD_TIMEOUT):
             line = line.rstrip("\n")
+            if line.startswith("OPENMAGIA_RESULT "):
+                fastvideo_result = json.loads(line.split(" ", 1)[1])
             parsed = parse_h3_progress_line(line)
+            if fastvideo_job and parsed and parsed.get("phase") == "denoising" and parsed["completed"] == parsed["total"]:
+                parsed = {"phase":"decoding video and audio", "completed":0, "total":0}
             if parsed:
                 previous = progress.get(scene_id, {})
                 progress[scene_id] = {**parsed,
@@ -5178,7 +5272,7 @@ def run_job(scene_id, project):
         rc = proc.wait()
         if rc != 0:
             detail = " | ".join(clean_h3_output(t) for t in tail if clean_h3_output(t))[-800:]
-            raise RuntimeError(f"h3 exited with code {rc}: {detail}")
+            raise RuntimeError(f"{'FastVideo' if fastvideo_job else 'H3'} exited with code {rc}: {detail}")
         if is_image:
             frames = sorted(frames_dir.glob("frame-*.ppm"))
             if not frames:
@@ -5247,6 +5341,10 @@ def run_job(scene_id, project):
                                    "type": scene.get("generation_type", "video"),
                                    "frame_strategy": "middle_of_5" if is_image else None}
                 m["status"] = "ready"
+            if fastvideo_job:
+                m.setdefault("generation", {}).update({"backend":"fastvideo", "runtime":fastvideo_result,
+                    "model":fast_video.MODELS["reference" if fastvideo_request["references"] else "text"][0],
+                    "params":dict(scene["params"]), "execution_prompt":prompt})
             if thumb_url:
                 m["thumb"] = thumb_url
             scene["first_frame"] = first_url
@@ -5270,7 +5368,7 @@ def run_job(scene_id, project):
             failed_scene = next((s for s in latest["scenes"] if s["id"] == scene_id), None)
             pending = next((x for x in latest["media"] if x.get("scene_id") == scene_id), None)
             retry_stall = (isinstance(e, GenerationStalled) and failed_scene and
-                           int(failed_scene.get("stall_retries", 0)) < 1)
+                           int(failed_scene.get("stall_retries", 0)) < 1 and not fastvideo_job)
             if retry_stall:
                 failed_scene["stall_retries"] = int(failed_scene.get("stall_retries", 0)) + 1
                 failed_scene["params"] = safe_retry_params(failed_scene.get("params"))
@@ -5881,11 +5979,16 @@ class Handler(BaseHTTPRequestHandler):
                 out["projects"] = list_projects()
                 out["engine"] = {
                     "app_version": APP_IDENTITY["version"], "app_build": APP_IDENTITY["build"],
-                    "h3_bin": H3_BIN, "h3_bin_ok": Path(H3_BIN).exists(),
-                    "h3_backend": "h3mlx" if using_h3mlx() else "h3-metal",
+                    "h3_bin": H3_BIN, "h3_bin_ok": fast_video.state()["ready"] if using_fastvideo() else Path(H3_BIN).exists(),
+                    "h3_backend": "fastvideo" if using_fastvideo() else "h3mlx" if using_h3mlx() else "h3-metal",
+                    "fastvideo": fast_video.state(),
+                    "video_backends": [
+                        {"id":"h3-metal", "ready":Path(DEFAULTS["h3_bin"]).is_file() and partition_ready(H3_MODEL,"FL2VA")},
+                        {"id":"h3mlx", "ready":H3MLX_BIN.is_file() and partition_ready(H3_MODEL,"FL2VA")},
+                        {"id":"fastvideo", "ready":fast_video.state()["ready"]}],
                     "model_root": H3_MODEL,
                     "fl2va": partition_ready(H3_MODEL, "FL2VA"),
-                    "ref2va": ref2va_available(),
+                    "ref2va": fast_video.state()["ready"] if using_fastvideo() else ref2va_available(),
                     "media_dir": str(proj_dir(proj["slug"]) / "media"),
                     "timeline_end": round(timeline_end(proj), 3),
                     "formatter": formatter_available(),
@@ -5995,9 +6098,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/models/install":
             b = self._body()
             component = str(b.get("component") or "")
-            if component not in ("h3", "h3mlx", "formatter", "runtime", "yue", "qwen-image"):
+            if component not in ("h3", "h3mlx", "formatter", "runtime", "yue", "qwen-image", "fastvideo"):
                 return self._json({"error": "unknown model component"}, 400)
-            if component in ("h3", "h3mlx") and not b.get("accepted_license"):
+            if component in ("h3", "h3mlx", "fastvideo") and not b.get("accepted_license"):
                 return self._json({"error": "Accept the MiniMax H3 license before downloading."}, 400)
             if component == "qwen-image" and not b.get("accepted_license"):
                 return self._json({"error": "Accept the Qwen Research License before downloading."}, 400)
@@ -6521,6 +6624,15 @@ class Handler(BaseHTTPRequestHandler):
             requested_type = str(b.get("generation_type") or "video")
             generation_type = ("music" if requested_type == "music"
                                else "image" if requested_type == "image" else "video")
+            if generation_type == "video" and using_fastvideo():
+                if not fast_video.state()["ready"]:
+                    return self._json({"error":"Install FastVideo in Settings first."}, 400)
+                if not 120 <= int((b.get("params") or {}).get("frames", 56)) <= 360:
+                    return self._json({"error":"FastVideo generates 5–15 seconds."}, 400)
+                if b.get("source_media_id") or b.get("chain"):
+                    return self._json({"error":"FastVideo can’t use an opening frame. Switch to H3."}, 400)
+                if model_installs.get("fastvideo", {}).get("status") == "running":
+                    return self._json({"error":"Wait for FastVideo installation to finish."}, 400)
             image_model = str(b.get("image_model") or "h3")
             if generation_type == "image" and image_model not in ("h3", "qwen-image"):
                 return self._json({"error": "Unknown image model"}, 400)

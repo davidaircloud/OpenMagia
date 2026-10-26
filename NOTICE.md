@@ -20,6 +20,16 @@ OpenMagia would not exist without them.
 - Role: the generation engine. Prompt-to-video/audio, first/last-frame
   conditioning, and ordered reference (Ref2VA) inference on Metal.
 
+### FastVideo — optional distilled video backend
+- Upstream: <https://github.com/hao-ai-lab/FastVideo>
+- Code license: Apache License 2.0 — Hao AI Lab and contributors.
+- Role: optional native Apple Silicon MLX inference. Uses FastH3 Trim for
+  text-to-video and FastH3 Omni for image-reference video, with a separate
+  managed runtime and checkpoints under `addons/fastvideo/`.
+- FastH3 weights retain the MiniMax H3 Community License; LightVAE is
+  Apache-2.0. Model weights and upstream source are downloaded separately,
+  not distributed in this repository. See `docs/FASTVIDEO_INTEGRATION.md`.
+
 ### llama.cpp — local prompt-formatting runtime
 - Upstream: <https://github.com/ggml-org/llama.cpp>
 - License: MIT License — Copyright (c) 2023–2026 The ggml authors

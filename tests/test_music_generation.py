@@ -340,7 +340,7 @@ class Registry(unittest.TestCase):
 
     def test_music_is_installable_from_the_shared_models_endpoint(self):
         source = Path(server.__file__).read_text(encoding="utf-8")
-        self.assertIn('(\"h3\", \"h3mlx\", \"formatter\", \"runtime\", \"yue\", \"qwen-image\")', source)
+        self.assertIn('(\"h3\", \"h3mlx\", \"formatter\", \"runtime\", \"yue\", \"qwen-image\", \"fastvideo\")', source)
 
     def test_generate_and_cast_are_sibling_panels(self):
         html = (Path(server.__file__).parent / "index.html").read_text(encoding="utf-8")

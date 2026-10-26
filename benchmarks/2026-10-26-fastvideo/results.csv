@@ -1,0 +1,7 @@
+backend,mode,wall_seconds,duration_seconds,width,height,audio,requested_frames,passes,layers,reuse,seed,output,model,attention,peak_mlx_gib,sha256
+h3.c,text,310.605,5.18,512,512,True,120,20,45,2,20261026,h3-metal-text.mp4,MiniMax-H3 FL2VA,native Metal,,b2f961b031fd9b2ae37172e066b39e31150ef1481020b4ae8918b20713667070
+h3.c,image,326.59,5.18,512,512,True,120,20,45,2,20261026,h3-metal-image.mp4,MiniMax-H3 Ref2VA,native Metal,,9bca7768b99565d13daf04115fe640ca0c612832121c63c9a0f56b569b0ef412
+H3MLX,text,262.144,5.2,512,512,True,120,20,35,2,20261026,h3mlx-text.mp4,MiniMax-H3 FL2VA,native Metal,,5b3460e0da369114c25efd35341c67683dd1dbb6c1434c0f2b2d2ddc92cf60ed
+H3MLX,image,283.883,5.2,512,512,True,120,20,35,2,20261026,h3mlx-image.mp4,MiniMax-H3 Ref2VA,native Metal,,6e3ffba8216d87c83d3dbc331cab4bdea0c3d22088bda815891ab24648e7fc51
+FastVideo,text,132.413,5.17,512,512,True,120,8,,,20261026,fastvideo-text.mp4,FastVideo/FastVideo-FastH3-Trim-8-Step-MLX-INT6,nax,17.622,da21fca6e952ecc5cd110e0572aaa3bcb94d8f116e21423429f9b2c4a2415497
+FastVideo,image,175.62,5.17,512,512,True,120,8,,,20261026,fastvideo-image.mp4,FastVideo/FastVideo-FastH3-Omni-8-Step-V1,nax,20.424,eabd1b4c13e7c672af1bc5fdc2b811ae9609f73bbfe33a9f1fa56b5cfa99e070

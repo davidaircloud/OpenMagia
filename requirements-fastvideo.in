@@ -1,0 +1,11 @@
+# Apple Silicon inference only. No training stack or FastVideo web server.
+mlx==0.32.4
+numpy==2.5.4
+scipy==1.18.1
+pillow==13.0.0
+opencv-python==5.0.0.93
+transformers==5.15.1
+tokenizers==0.22.2
+safetensors==0.8.0
+huggingface-hub==1.33.0
+av==19.0.2
